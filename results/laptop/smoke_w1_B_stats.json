@@ -1,0 +1,75 @@
+{
+  "config": "smoke_w1_B",
+  "wall_clock_sec": 3.541,
+  "n_samples": 7,
+  "sample_interval_sec": 0.5,
+  "avg_cpu_pct": 0.7,
+  "peak_rss_mb": 99.45,
+  "avg_rss_mb": 95.76,
+  "peak_host_ram_gb": 5.7,
+  "avg_gpu_util_pct": 0.0,
+  "peak_gpu_util_pct": 0.0,
+  "avg_gpu_mem_util_pct": 0.0,
+  "peak_gpu_mem_used_mb": 0.0,
+  "avg_gpu_power_w": 0.0,
+  "pipeline_continuity": 0.0,
+  "bytes_read_delta": 0,
+  "bytes_written_delta": 0,
+  "mb_written_delta": 0.0,
+  "write_throughput_mb_s": 0.0,
+  "samples": [
+    {
+      "t_sec": 0.004,
+      "cpu_pct": 0.0,
+      "rss_mb": 99.45,
+      "host_ram_used_gb": 5.7,
+      "host_ram_pct": 84.4
+    },
+    {
+      "t_sec": 0.518,
+      "cpu_pct": 1.1,
+      "rss_mb": 94.45,
+      "host_ram_used_gb": 5.66,
+      "host_ram_pct": 84.1
+    },
+    {
+      "t_sec": 1.026,
+      "cpu_pct": 0.5,
+      "rss_mb": 94.62,
+      "host_ram_used_gb": 5.67,
+      "host_ram_pct": 84.2
+    },
+    {
+      "t_sec": 1.537,
+      "cpu_pct": 1.8,
+      "rss_mb": 95.45,
+      "host_ram_used_gb": 5.69,
+      "host_ram_pct": 84.4
+    },
+    {
+      "t_sec": 2.046,
+      "cpu_pct": 0.6,
+      "rss_mb": 95.44,
+      "host_ram_used_gb": 5.69,
+      "host_ram_pct": 84.4
+    },
+    {
+      "t_sec": 2.561,
+      "cpu_pct": 0.5,
+      "rss_mb": 95.54,
+      "host_ram_used_gb": 5.67,
+      "host_ram_pct": 84.2
+    },
+    {
+      "t_sec": 3.067,
+      "cpu_pct": 0.4,
+      "rss_mb": 95.35,
+      "host_ram_used_gb": 5.67,
+      "host_ram_pct": 84.2
+    }
+  ],
+  "nvidia_dmon_log": "/tmp/nvidia_dmon_smoke_w1_B.log",
+  "workload": "w1",
+  "execution": "B",
+  "depth": null
+}

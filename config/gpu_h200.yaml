@@ -1,0 +1,58 @@
+# H200 141GB — full benchmark tier.
+# Real numbers: 10K rows, FP8 large models, all 4 configs × 4 workloads.
+
+profile: gpu_h200
+hardware:
+  device: cuda
+  num_partitions: 4            # one partition per ~25% of workload
+  gpu_mem_headroom_gb: 15      # keep >=15GB free for KV cache + overheads
+
+dataset:
+  source: openbmb/UltraFeedback
+  split: train
+  n_rows: 10000
+  columns:
+    prompt_id: int
+    prompt_text: string
+  out_dir: data/gpu
+
+models:
+  # Generator pinned to FP8 quant that fits in 141 GB VRAM per the spec.
+  # Actual model string may vary with the Qwen release calendar — override
+  # via --model-generator on the CLI if needed.
+  generator:
+    name: Qwen/Qwen3.5-122B-A10B-FP8
+    fallback_name: Qwen/Qwen2.5-7B-Instruct   # if 122B FP8 unavailable
+    max_new_tokens: 128
+    temperature: 0.7
+    dtype: float8_e4m3fn
+    use_vllm: true
+    allow_mock: false
+  scorer:
+    name: OpenAssistant/reward-model-deberta-v3-large-v2
+    fallback_name: OpenAssistant/reward-model-deberta-v3-large
+    allow_mock: false
+  embedder:
+    name: BAAI/bge-large-en-v1.5
+    allow_mock: false
+
+workloads:
+  w0_chained:
+    depths: [1, 2, 3]
+    batch_size: 1024
+  w1_best_of_n:
+    n_candidates: 4
+    batch_size: 32
+  w2_batched:
+    batch_size: 32
+  w3_embedding:
+    batch_size: 256
+    n_queries: 50
+
+execution:
+  configs: [A, B, C, D]
+
+runner:
+  sail_remote_url: "sc://localhost:50051"
+  sample_interval_sec: 0.5
+  results_dir: results/gpu

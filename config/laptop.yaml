@@ -1,0 +1,54 @@
+# Laptop (CPU / Apple Silicon MPS) — smoke tier.
+# Proves wiring and measures baseline overhead on a small dataset.
+
+profile: laptop
+hardware:
+  device: auto                 # "cpu" | "mps" | "cuda" | "auto"
+  num_partitions: 2            # keep tiny so parallelism doesn't dominate
+
+dataset:
+  source: openbmb/UltraFeedback
+  split: train
+  n_rows: 100
+  columns:
+    prompt_id: int
+    prompt_text: string
+  out_dir: data/laptop
+
+models:
+  # Generator, scorer, embedder selections match what the spec asks for
+  # at the Milestone-1 tier. All three are small enough to run on a
+  # MacBook CPU or Apple MPS.
+  generator:
+    name: Qwen/Qwen2.5-0.5B-Instruct
+    max_new_tokens: 32
+    temperature: 0.7
+    allow_mock: true           # fall back to mock if transformers missing
+  scorer:
+    # Qwen 0.5B reward model — if unavailable, use mock
+    name: Qwen/Qwen2.5-Math-RM-72B  # placeholder; mock path is used on laptop
+    prefer_mock: true          # on laptop always prefer mock scorer
+  embedder:
+    name: sentence-transformers/all-MiniLM-L6-v2
+    allow_mock: true
+
+workloads:
+  w0_chained:
+    depths: [1, 2, 3]
+    batch_size: 32
+  w1_best_of_n:
+    n_candidates: 4
+    batch_size: 8
+  w2_batched:
+    batch_size: 8
+  w3_embedding:
+    batch_size: 16
+    n_queries: 5
+
+execution:
+  configs: [A, B, C, D]        # A=spark-row, B=spark-pandas, C=sail-arrow, D=sail-udtf
+
+runner:
+  sail_remote_url: "sc://localhost:50051"   # used for Config C/D
+  sample_interval_sec: 0.5
+  results_dir: results/laptop

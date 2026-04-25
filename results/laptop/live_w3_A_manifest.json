@@ -1,0 +1,19 @@
+{
+  "run_id": "live_w3_A",
+  "workload": "w3",
+  "execution": "A",
+  "depth": null,
+  "timestamp_utc": "2026-04-23T06:31:13.591373Z",
+  "host": "Tamirs-MacBook-Pro-3.local",
+  "platform": "macOS-15.7.1-arm64-arm-64bit",
+  "python": "3.11.14",
+  "profile": "laptop",
+  "device": "auto",
+  "num_partitions": 2,
+  "dataset_rows": 100,
+  "output_parquet": "results/laptop/live_w3_A_output.parquet",
+  "output_rows": 100,
+  "wall_clock_sec": 3.862,
+  "boundary_json": null,
+  "stats_json": "results/laptop/live_w3_A_stats.json"
+}

@@ -1,0 +1,19 @@
+{
+  "run_id": "smoke_w0_A_d2",
+  "workload": "w0",
+  "execution": "A",
+  "depth": 2,
+  "timestamp_utc": "2026-04-23T05:24:35.479289Z",
+  "host": "Tamirs-MacBook-Pro-3.local",
+  "platform": "macOS-15.7.1-arm64-arm-64bit",
+  "python": "3.11.14",
+  "profile": "laptop",
+  "device": "auto",
+  "num_partitions": 2,
+  "dataset_rows": 100,
+  "output_parquet": "results/laptop/smoke_w0_A_d2_output.parquet",
+  "output_rows": 100,
+  "wall_clock_sec": 3.177,
+  "boundary_json": null,
+  "stats_json": "results/laptop/smoke_w0_A_d2_stats.json"
+}

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sail-vs-spark-benchmark"
+version = "0.1.0"
+description = "Benchmark suite comparing Sail and Spark on AI inference workloads."
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers --tb=short"
+markers = [
+    "needs_torch: test requires the torch package",
+    "needs_spark: test requires pyspark",
+    "needs_sail: test requires pysail",
+    "slow: slow test, skip by default",
+]
+timeout = 120
