@@ -49,6 +49,7 @@ def _cfg_mock() -> dict:
         "workloads": {
             "w1_best_of_n": {"n_candidates": 2},
             "w3_embedding": {"n_queries": 3},
+            "w4_agentic": {"max_iterations": 2, "reward_threshold": 0.2, "n_candidates": 2},
         },
     }
 
@@ -92,6 +93,17 @@ def test_config_a_w3(spark, prompts_parquet, tmp_path):
     }
 
 
+def test_config_a_w4(spark, prompts_parquet, tmp_path):
+    from sail_vs_spark.configs import config_a_spark_row as ca
+    out = str(tmp_path / "a_w4.parquet")
+    n = ca.run_w4(spark, prompts_parquet, _cfg_mock(), out)
+    assert n == 20
+    t = pq.read_table(out)
+    assert set(t.column_names) == {
+        "prompt_id", "final_response", "iterations", "best_reward"
+    }
+
+
 
 # ── Config B (Spark Pandas/Arrow UDF) ───────────────────────────────────────
 def test_config_b_w0_depth_2(spark, prompts_parquet):
@@ -122,6 +134,13 @@ def test_config_b_w3(spark, prompts_parquet, tmp_path):
     from sail_vs_spark.configs import config_b_spark_pandas as cb
     out = str(tmp_path / "b_w3.parquet")
     n = cb.run_w3(spark, prompts_parquet, _cfg_mock(), out)
+    assert n == 20
+
+
+def test_config_b_w4(spark, prompts_parquet, tmp_path):
+    from sail_vs_spark.configs import config_b_spark_pandas as cb
+    out = str(tmp_path / "b_w4.parquet")
+    n = cb.run_w4(spark, prompts_parquet, _cfg_mock(), out)
     assert n == 20
 
 

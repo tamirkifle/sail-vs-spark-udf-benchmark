@@ -6,7 +6,7 @@ def download_models():
     # We'll try to import these only when needed
     from huggingface_hub import snapshot_download
     
-    configs = ["config/laptop.yaml", "config/gpu_h200.yaml", "config/gpu_v100_smoke.yaml"]
+    configs = ["config/laptop.yaml"]
     repo_dir = Path(__file__).parent.parent
     models_dir = repo_dir / "models"
     models_dir.mkdir(exist_ok=True)

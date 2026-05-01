@@ -15,6 +15,7 @@ from sail_vs_spark.workloads.w0_chained import W0Chained
 from sail_vs_spark.workloads.w1_best_of_n import W1BestOfN
 from sail_vs_spark.workloads.w2_batched import W2Batched
 from sail_vs_spark.workloads.w3_embedding import W3Embedding
+from sail_vs_spark.workloads.w4_agentic import W4Agentic
 
 
 def setup_function(_) -> None:
@@ -129,6 +130,27 @@ def test_w3_batch_equals_single():
         assert b["best_similarity"][i] == pytest.approx(sim, abs=1e-6)
 
 
+# ── W4 ───────────────────────────────────────────────────────────────────────
+def test_w4_apply_shape():
+    w = W4Agentic(max_iterations=2, reward_threshold=0.2, n_candidates=2)
+    w.init(_cfg_mock())
+    pid, resp, iterations, reward = w.apply(11, "hello")
+    assert pid == 11
+    assert isinstance(resp, str)
+    assert 1 <= iterations <= 2
+    assert -1.0 <= reward <= 1.0
+
+
+def test_w4_batch_shape():
+    w = W4Agentic(max_iterations=2, reward_threshold=0.2, n_candidates=2)
+    w.init(_cfg_mock())
+    out = w.apply_batch([1, 2], ["a", "b"])
+    assert out["prompt_id"] == [1, 2]
+    assert len(out["final_response"]) == 2
+    assert len(out["iterations"]) == 2
+    assert len(out["best_reward"]) == 2
+
+
 # ── registry ─────────────────────────────────────────────────────────────────
 def test_registry_all_four():
     base_cfg = _cfg_mock()
@@ -136,10 +158,11 @@ def test_registry_all_four():
         "w0_chained": {"depth": 2},
         "w1_best_of_n": {"n_candidates": 2},
         "w3_embedding": {"n_queries": 3},
+        "w4_agentic": {"max_iterations": 2, "reward_threshold": 0.25, "n_candidates": 2},
     }
     for code, expected_cls in [
         ("w0", W0Chained), ("w1", W1BestOfN),
-        ("w2", W2Batched), ("w3", W3Embedding),
+        ("w2", W2Batched), ("w3", W3Embedding), ("w4", W4Agentic),
     ]:
         wl = make_workload(code, base_cfg)
         assert isinstance(wl, Workload)

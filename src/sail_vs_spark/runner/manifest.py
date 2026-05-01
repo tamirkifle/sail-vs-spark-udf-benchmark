@@ -83,6 +83,7 @@ def make_manifest(
     output_rows: int | None = None,
     boundary_json: str | None = None,
     stats_json: str | None = None,
+    trace_json: str | None = None,
 ) -> dict[str, Any]:
     req_device = (cfg or {}).get("hardware", {}).get("device")
     return {
@@ -107,6 +108,7 @@ def make_manifest(
         "wall_clock_sec": wall_clock_sec,
         "boundary_json": boundary_json,
         "stats_json": stats_json,
+        "trace_json": trace_json,
     }
 
 

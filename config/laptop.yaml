@@ -31,7 +31,7 @@ models:
     allow_mock: true          # enforce real model
   embedder:
     name: sentence-transformers/all-MiniLM-L6-v2
-    allow_mock: true          # enforce real model
+    allow_mock: false          # enforce real model
 
 workloads:
   w0_chained:

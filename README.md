@@ -11,10 +11,10 @@ the overhead vanish.
 > AI pipelines are not compute-bound in Spark — they are data-movement bound.
 > As GPUs get faster, Spark becomes **more** inefficient, while Sail scales.
 
-The benchmark quantifies this with 4 workloads × 4 execution configurations
+The benchmark quantifies this with 5 workloads × 4 execution configurations
 on the same data and same models, differing **only** in the runtime/UDF path.
 
-## Workload matrix (4 × 4 = 16 runs per hardware tier)
+## Workload matrix (5 × 4 = 20 runs per hardware tier)
 
 | Code | Workload                    | Pattern                                                      |
 | ---- | --------------------------- | ------------------------------------------------------------ |
@@ -22,6 +22,7 @@ on the same data and same models, differing **only** in the runtime/UDF path.
 | W1   | Best-of-N LLM (PRIMARY)     | `prompt → N candidates → score → argmax`                     |
 | W2   | Batched LLM inference       | `batch(prompts) → generate`                                  |
 | W3   | Embedding pipeline (RAG)    | `text → embedding → similarity score`                        |
+| W4   | Agentic refinement loop     | `prompt → generate/score loop → stop on threshold`           |
 
 | Code | Engine | Execution path          | Serialization cost expected |
 | ---- | ------ | ----------------------- | --------------------------- |
@@ -42,9 +43,12 @@ Real numbers for the write-up.
 ## Quickstart
 
 ```bash
-# one-time: install into the sail venv
+# one-time: install the package into the sail venv
 source /Users/tamir/Documents/MyCode/LakeSail/sail/.venvs/default/bin/activate
-pip install -r requirements.txt
+pip install -e .
+
+# install environment-specific runtime deps as needed
+# for example: pytest pyarrow pyspark pyyaml sentence-transformers transformers
 
 # 1) prep dataset
 python scripts/prep_dataset.py --config config/laptop.yaml

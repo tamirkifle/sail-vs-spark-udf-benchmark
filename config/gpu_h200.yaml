@@ -10,7 +10,7 @@ hardware:
 dataset:
   source: openbmb/UltraFeedback
   split: train
-  n_rows: 10000
+  n_rows: 1500
   columns:
     prompt_id: int
     prompt_text: string
@@ -69,3 +69,4 @@ runner:
   sail_remote_url: "sc://localhost:50051"
   sample_interval_sec: 0.5
   results_dir: results/gpu
+  iterations: 1
