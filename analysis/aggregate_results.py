@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import webbrowser
 from html import escape
 from dataclasses import dataclass
 from pathlib import Path
@@ -748,6 +749,11 @@ def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
         }
 
     rows = run_df[["Workload", "Config", "WallTime", "UDFTime_sec"]].copy()
+    rows["RawUDFTime_sec"] = rows["UDFTime_sec"]
+    rows["UDFTime_sec"] = rows.apply(
+        lambda row: min(float(row["WallTime"]), float(row["UDFTime_sec"])),
+        axis=1,
+    )
     rows["Overhead_sec"] = rows.apply(
         lambda row: max(0.0, float(row["WallTime"]) - float(row["UDFTime_sec"])),
         axis=1,
@@ -774,6 +780,7 @@ def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
                     "label": get_label(config),
                     "wall_sec": round(float(row["WallTime"]), 6),
                     "udf_sec": round(float(row["UDFTime_sec"]), 6),
+                    "raw_udf_sec": round(float(row["RawUDFTime_sec"]), 6),
                     "overhead_sec": round(float(row["Overhead_sec"]), 6),
                 }
             )
@@ -874,11 +881,25 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
     axis: "#94a3b8",
   };
 
-  function formatSeconds(value) {
+  function formatSeconds(value, compact = false) {
     if (!Number.isFinite(value)) {
       return "-";
     }
+    if (compact && Math.abs(value) >= 100) {
+      return `${Math.round(value)}s`;
+    }
+    if (compact && Math.abs(value) >= 10) {
+      return `${value.toFixed(1)}s`;
+    }
     return value >= 1 ? `${value.toFixed(2)}s` : `${value.toFixed(3)}s`;
+  }
+
+  function estimateTextWidth(text, fontSize = 11) {
+    return String(text).length * fontSize * 0.62;
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
   }
 
   function hideTooltip() {
@@ -891,6 +912,7 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
       .html(`
         <strong>${datum.workload} · Config ${datum.config}</strong>
         <div class="metric"><span>UDF compute</span><span>${formatSeconds(datum.udf_sec)}</span></div>
+        ${datum.raw_udf_sec > datum.udf_sec ? `<div class="metric"><span>Raw traced UDF</span><span>${formatSeconds(datum.raw_udf_sec)}</span></div>` : ""}
         <div class="metric"><span>Framework overhead</span><span>${formatSeconds(datum.overhead_sec)}</span></div>
         <div class="metric"><span>Total wall time</span><span>${formatSeconds(datum.wall_sec)}</span></div>
       `);
@@ -922,11 +944,12 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
     chartNode.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
 
     const panelWidth = (containerWidth - gap * (cols - 1)) / cols;
-    const panelHeight = 286;
-    const margin = { top: 26, right: 14, bottom: 38, left: 46 };
+    const panelHeight = 340;
+    const maxWall = Math.max(3.0, (payload.maxWallSec || 0) * 1.25);
+    const yAxisLabelWidth = estimateTextWidth(formatSeconds(maxWall, true));
+    const margin = { top: 44, right: 18, bottom: 38, left: Math.max(46, Math.ceil(yAxisLabelWidth + 20)) };
     const innerWidth = Math.max(180, panelWidth - margin.left - margin.right);
     const innerHeight = panelHeight - margin.top - margin.bottom;
-    const maxWall = Math.max(3.0, (payload.maxWallSec || 0) * 1.25);
     const yScale = d3.scaleSymlog().constant(0.02).domain([0, maxWall]).nice().range([innerHeight, 0]);
     const xScale = d3.scaleBand().domain(payload.configs.map((d) => d.code)).range([0, innerWidth]).padding(0.24);
     const barWidth = xScale.bandwidth();
@@ -956,7 +979,7 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
 
       g.append("g")
         .attr("class", "overhead-axis")
-        .call(d3.axisLeft(yScale).ticks(4).tickFormat((d) => formatSeconds(d)));
+        .call(d3.axisLeft(yScale).ticks(4).tickFormat((d) => formatSeconds(d, true)));
 
       g.append("g")
         .attr("class", "overhead-axis")
@@ -1005,13 +1028,18 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
         .attr("fill", palette.overhead);
 
       barGroups.append("text")
-        .attr("x", barWidth / 2)
+        .attr("x", (d) => {
+          const labelWidth = estimateTextWidth(formatSeconds(d.wall_sec, true), 11);
+          const barCenter = (xScale(d.config) || 0) + barWidth / 2;
+          const safeCenter = clamp(barCenter, labelWidth / 2 + 2, innerWidth - labelWidth / 2 - 2);
+          return safeCenter - (xScale(d.config) || 0);
+        })
         .attr("y", (d) => Math.max(12, yScale(d.wall_sec) - 8))
         .attr("text-anchor", "middle")
         .attr("fill", palette.axis)
         .attr("font-size", 11)
         .attr("font-weight", 700)
-        .text((d) => formatSeconds(d.wall_sec));
+        .text((d) => formatSeconds(d.wall_sec, true));
     });
   }
 
@@ -1989,7 +2017,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results_dir", required=True)
     args = parser.parse_args()
+    results_dir = Path(args.results_dir)
     aggregate(args.results_dir)
+    report_path = results_dir / "aggregate.html"
+    if report_path.exists():
+        webbrowser.open(report_path.resolve().as_uri())
     return 0
 
 

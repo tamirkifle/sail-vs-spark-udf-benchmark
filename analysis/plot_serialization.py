@@ -188,13 +188,13 @@ def main() -> int:
             -0.16,
             idx,
             workload,
-            transform=ax.get_yaxis_transform(),
-            ha="right",
-            va="center",
-            fontsize=10,
-            fontweight="bold",
-            color="#111827",
-        )
+        transform=ax.get_yaxis_transform(),
+        ha="right",
+        va="center",
+        fontsize=10,
+        fontweight="bold",
+        color="#111827",
+    )
 
     fig.tight_layout()
     fig.savefig(out, dpi=140)
