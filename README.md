@@ -1,15 +1,13 @@
 # Sail vs Spark — AI Workload Benchmark Suite
 
-**Purpose.** Prove, with reproducible measurements on real AI workloads, that
-**Sail** eliminates the data-movement bottleneck that dominates AI pipelines in
-**Spark**. As model size and GPU speed increase, Spark's fixed IPC overhead
-becomes a larger fraction of total time — Sail's zero-copy Arrow path makes
-the overhead vanish.
+**Purpose.** Compare how different execution paths affect performance on real
+AI workloads, using reproducible measurements. The benchmark keeps the data
+and models fixed while varying only the runtime/UDF path.
 
 ## Core hypothesis
 
-> AI pipelines are not compute-bound in Spark — they are data-movement bound.
-> As GPUs get faster, Spark becomes **more** inefficient, while Sail scales.
+> AI pipeline performance is strongly shaped by data movement and runtime
+> boundary costs, not just model compute.
 
 The benchmark quantifies this with 5 workloads × 4 execution configurations
 on the same data and same models, differing **only** in the runtime/UDF path.
@@ -31,13 +29,13 @@ on the same data and same models, differing **only** in the runtime/UDF path.
 | C    | Sail   | `mapInArrow` zero-copy  | ≈ 0                         |
 | D    | Sail   | UDTF `LATERAL`          | ≈ 0                         |
 
-## Hardware tiers
+## How to run
 
-**Milestone 1 — Laptop (CPU / Apple Silicon MPS).** Dataset = 100 rows. Small
-models. Proves wiring works and shapes the expected overhead curve before the
+**Laptop (CPU / Apple Silicon MPS).** Dataset = 100 rows. Small
+models or mocks. Proves wiring works and shapes the expected overhead curve before the
 GPU run.
 
-**Milestone 2 — GPU (H200 141 GB).** Dataset = 10 000 rows. FP8 large models.
+**With GPU Access (H200 141 GB).** Dataset = 1,500 rows. FP8 larger models.
 Real numbers for the write-up.
 
 ## Quickstart
@@ -55,14 +53,15 @@ python scripts/prep_dataset.py --config config/laptop.yaml
 
 # 2) run one config (fastest smoke test)
 python -m sail_vs_spark.runner.cli --config config/laptop.yaml \
-       --workload w0 --execution A --depth 1
+       --workload w0 --execution A --depth 1 --samples 1
 
 # 3) run ALL 16 runs on laptop
 bash scripts/run_all_laptop.sh
 
-# 4) aggregate + plot
-python analysis/aggregate_results.py --results_dir results/
-python analysis/plot_gpu_timeline.py --results_dir results/
+# 4) aggregate report + plots
+python analysis/aggregate_results.py --results_dir results/laptop/20260501_064405
+# writes aggregate_runs.csv, aggregate_summary.csv/json, aggregate.md, aggregate.html, and plots
+# open the HTML report in your browser: results/laptop/20260501_064405/aggregate.html
 ```
 
 ## Key technical constraints (from prior learnings)
@@ -94,8 +93,8 @@ See `config/`, `src/sail_vs_spark/`, `scripts/`, `analysis/`, `tests/`.
 
 ## Visualisations produced
 
-1. GPU utilisation timeline (Spark sawtooth vs Sail flatline).
+1. GPU utilisation timeline.
 2. Runtime vs pipeline depth (W0).
-3. Host RSS over time.
-4. Cumulative disk writes over time.
-5. Serialization-vs-compute pie per config.
+3. Peak RSS by workload/config.
+4. Disk writes over time.
+5. Interactive HTML report.
