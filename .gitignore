@@ -54,3 +54,6 @@ third_party/sail/
 
 # Git
 .git/
+
+
+*.ipynb

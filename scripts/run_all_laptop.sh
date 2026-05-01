@@ -86,7 +86,7 @@ run_bench() {
 }
 
 # W1 / W2 / W3 / W4 (AI Workloads)
-for wl in w1 w2 w3 w4; do
+for wl in w4 w1 w2 w3; do
   for cfg in C D A B; do
     run_bench "$wl" "$cfg"
   done

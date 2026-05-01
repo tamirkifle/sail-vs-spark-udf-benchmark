@@ -1,5 +1,18 @@
-# V100 Smoke Test — Verify GPU code path without H200 wait times.
-# 100 rows, tiny models, FP16.
+# GPU Smoke Test — exercise every code path with minimal GPU time.
+# Goal: catch regressions before committing to a full H200 run.
+#
+# Usage:
+#   CONFIG=config/gpu_v100_smoke.yaml bash scripts/run_all_gpu.sh
+#
+# What "minimal" means here:
+#   - 10 rows, 2 partitions  → each partition gets 5 rows; verifies partitioning
+#   - W0 depth 1 only        → one chained-UDF pass, not three
+#   - W1/W4 n_candidates=1   → single generate+score per prompt
+#   - W4 max_iterations=1    → one agentic loop iteration, no retry path
+#   - W3 n_queries=3         → 3 reference embeddings, enough for similarity check
+#   - max_new_tokens=16      → short generation; verifies output path, not throughput
+#   - max_model_len=512      → small KV cache; faster vLLM startup
+#   - runner.iterations=1    → run each (workload, config) once, not 3×
 
 profile: gpu_v100_smoke
 hardware:
@@ -7,20 +20,17 @@ hardware:
   num_partitions: 2
 
 dataset:
-  source: synthetic            # Use synthetic for faster verification
-  n_rows: 100
+  source: synthetic
+  n_rows: 10
   out_dir: data/gpu_smoke
 
 models:
-  # Generator served by vLLM. MoE + FP8 architecture verifies the code path
-  # without needing H200 wait times. vLLM handles FP8 internally.
   generator:
     name: geonmin-kim/Qwen3-MoE-1.2B-A0.6B-FP8
-    max_new_tokens: 32
+    max_new_tokens: 16
     temperature: 0.7
     top_k: 50
     top_p: 0.9
-    # server_url: set via VLLM_BASE_URL env var by start_vllm_server.sh
     server_url: ""
     allow_mock: false
   scorer:
@@ -33,30 +43,34 @@ models:
 vllm:
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.85
-  max_model_len: 4096
+  max_model_len: 512
   quantization: fp8
   port: 8000
   host: "127.0.0.1"
+  # geonmin-kim FP8 upload is missing all tokenizer files (broken upload).
+  # Qwen2.5 shares the same tiktoken base vocab as Qwen3; safe for non-thinking use.
+  tokenizer: "Qwen/Qwen2.5-7B-Instruct"
 
 workloads:
   w0_chained:
     depths: [1]
-    batch_size: 32
+    batch_size: 10
   w1_best_of_n:
-    n_candidates: 2
-    batch_size: 8
+    n_candidates: 1
+    batch_size: 4
   w2_batched:
-    batch_size: 8
+    batch_size: 4
   w3_embedding:
-    batch_size: 32
-    n_queries: 10
+    batch_size: 10
+    n_queries: 3
   w4_agentic:
-    max_iterations: 2
+    max_iterations: 1
     reward_threshold: 0.5
-    n_candidates: 2
-    batch_size: 8
+    n_candidates: 1
+    batch_size: 4
 
 runner:
   sail_remote_url: "sc://localhost:50051"
   sample_interval_sec: 0.5
   results_dir: results/gpu_smoke
+  iterations: 1

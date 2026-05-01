@@ -9,7 +9,7 @@
 #SBATCH --error=logs/bench_gpu_smoke_%j.err
 
 # GPU Smoke Test for Sail vs Spark on NEU Explorer.
-# Matching production architecture (FP8 + MoE) on an L40S.
+# Matching production architecture (FP8 + MoE) on an H100.
 
 set -euo pipefail
 
@@ -53,9 +53,9 @@ TS=$(date +%Y%m%d_%H%M%S)
 export RESULTS_DIR="results/gpu_smoke/$TS"
 mkdir -p "$RESULTS_DIR"
 
-echo "[explorer] Starting GPU Smoke Test (L40S / FP8) -> $RESULTS_DIR"
+echo "[explorer] Starting GPU Smoke Test (H100 / FP8) -> $RESULTS_DIR"
 export CONFIG="config/gpu_v100_smoke.yaml"
-bash scripts/run_all_laptop.sh
+bash scripts/run_all_gpu.sh
 
 echo "[explorer] Done. Aggregating results in $RESULTS_DIR..."
 "$VENV/bin/python" analysis/aggregate_results.py --results_dir "$RESULTS_DIR"

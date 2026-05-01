@@ -20,8 +20,7 @@ models:
   # Generator served by vLLM (start_vllm_server.sh). vLLM handles FP8
   # quantization internally — no finegrained-fp8/causal-conv1d kernels needed.
   generator:
-    name: Qwen/Qwen3.5-122B-A10B-FP8
-    fallback_name: Qwen/Qwen2.5-7B-Instruct   # if 122B FP8 unavailable
+    name: Qwen/Qwen3.6-27B-FP8
     max_new_tokens: 128
     temperature: 0.7
     top_k: 50
@@ -39,8 +38,8 @@ models:
 
 vllm:
   tensor_parallel_size: 1
-  gpu_memory_utilization: 0.90
-  max_model_len: 8192
+  gpu_memory_utilization: 0.75  # 27B FP8 ≈ 27 GiB; leaves ~36 GiB free for scorer/embedder/workers
+  max_model_len: 4096
   quantization: fp8
   port: 8000
   host: "127.0.0.1"

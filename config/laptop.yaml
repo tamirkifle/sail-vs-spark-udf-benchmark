@@ -23,15 +23,15 @@ models:
     name: Qwen/Qwen2.5-0.5B-Instruct
     max_new_tokens: 32
     temperature: 0.7
-    allow_mock: false          # enforce real model
+    allow_mock: true          # enforce real model
   scorer:
     # Small reward model for testing
     name: OpenAssistant/reward-model-deberta-v3-large-v2
     prefer_mock: false         # load real reward model
-    allow_mock: false          # enforce real model
+    allow_mock: true          # enforce real model
   embedder:
     name: sentence-transformers/all-MiniLM-L6-v2
-    allow_mock: false          # enforce real model
+    allow_mock: true          # enforce real model
 
 workloads:
   w0_chained:

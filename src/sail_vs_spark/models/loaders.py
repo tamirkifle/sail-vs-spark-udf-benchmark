@@ -285,11 +285,26 @@ def _resolve_device(requested: str, component: str = "model") -> str:
 class _VLLMGenerator:
     """Calls a running vLLM OpenAI-compatible server via stdlib urllib.
 
-    vLLM handles FP8 quantization internally — no finegrained-fp8,
-    causal-conv1d, or deep-gemm kernels required in the UDF process.
-    Uses /v1/completions (not /v1/chat/completions) so that a batch of
-    prompts can be submitted in a single HTTP request.
+    Uses /v1/chat/completions (not /v1/completions). vLLM V1 engine
+    (0.19+) changed /v1/completions internals for Qwen3-class models —
+    it internally creates an encoder/decoder split and requires an
+    explicit decoder_prompt, which our plain-string prompts don't
+    supply, causing 400 "decoder prompt cannot be empty". Chat
+    completions routes through the standard causal-LM path and works
+    correctly. One HTTP request is made per prompt; vLLM continuous-
+    batches them internally so GPU utilisation is unchanged.
     """
+
+    # Bypass the cluster's http_proxy (Squid), which intercepts even localhost
+    # traffic. Using a no-proxy opener ensures requests go directly to vLLM.
+    _opener = None
+
+    @classmethod
+    def _get_opener(cls):
+        if cls._opener is None:
+            import urllib.request as _ur
+            cls._opener = _ur.build_opener(_ur.ProxyHandler({}))
+        return cls._opener
 
     def __init__(
         self,
@@ -314,44 +329,64 @@ class _VLLMGenerator:
         max_new_tokens: int | None = None,
     ) -> List[List[str]]:
         import json
+        import re
         import time
         import urllib.error
         import urllib.request
 
-        prompts_list = list(prompts)
-        payload = {
-            "model": self.model_id,
-            "prompt": prompts_list,
-            "n": n,
-            "max_tokens": max_new_tokens or self.max_new_tokens,
-            # temperature=0 selects greedy decoding — fastest path for n=1.
-            "temperature": 0 if n == 1 else self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,  # vLLM extension; ignored by strict OpenAI clients
-        }
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{self.server_url}/v1/completions",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        for attempt in range(3):
-            try:
-                with urllib.request.urlopen(req, timeout=300) as resp:
-                    data = json.loads(resp.read())
-                break
-            except urllib.error.URLError:
-                if attempt == 2:
-                    raise
-                time.sleep(2 ** attempt)
+        _think_re = re.compile(r"<think>.*?</think>", re.DOTALL)
+        greedy = (n == 1)
+        max_tok = max_new_tokens or self.max_new_tokens
+        results: List[List[str]] = []
 
-        choices = data["choices"]  # len = len(prompts_list) * n
-        k = len(prompts_list)
-        return [
-            [choices[i * n + j]["text"].strip() for j in range(n)]
-            for i in range(k)
-        ]
+        for prompt in list(prompts):
+            payload: dict = {
+                "model": self.model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "n": n,
+                "max_tokens": max_tok,
+                "temperature": 0 if greedy else self.temperature,
+                # Qwen3 thinking mode generates <think>...</think> before answering.
+                # vLLM V1 (0.19+) uses that thinking prefix as the internal "decoder
+                # prompt"; if the template produces an empty thinking prefix, vLLM
+                # raises "decoder prompt cannot be empty". Disabling thinking avoids
+                # this and also keeps response latency predictable.
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+            if not greedy:
+                payload["top_p"] = self.top_p
+                payload["top_k"] = self.top_k
+            body = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                f"{self.server_url}/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            opener = self._get_opener()
+            for attempt in range(3):
+                try:
+                    with opener.open(req, timeout=300) as resp:
+                        data = json.loads(resp.read())
+                    break
+                except urllib.error.HTTPError as e:
+                    body_snippet = e.read(512).decode(errors="replace")
+                    raise RuntimeError(
+                        f"vLLM {e.code} {e.reason}: {body_snippet}"
+                    ) from e
+                except urllib.error.URLError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(2 ** attempt)
+
+            # Strip Qwen3 chain-of-thought thinking tokens if present.
+            candidates = [
+                _think_re.sub("", c["message"]["content"]).strip()
+                for c in data["choices"]
+            ]
+            results.append(candidates)
+
+        return results
 
 
 class _HFGenerator:
@@ -524,27 +559,22 @@ class _HFGenerator:
 class _HFScorer:
     """Wraps a HF reward model with batched scoring."""
 
-    def __init__(self, model_id: str, device: str, dtype: str | None = None) -> None:
+    def __init__(self, model_id: str, device: str) -> None:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         model_name = _resolve_model_path(model_id)
         
-        if dtype is None:
-            resolved_dtype = torch.float16 if device == "cuda" else "auto"
-        elif isinstance(dtype, str) and dtype in _FP8_DTYPE_NAMES:
-            resolved_dtype = torch.float16
-            print(f"[loaders] scorer dtype={dtype!r} → float16 compute dtype")
-        elif isinstance(dtype, str) and hasattr(torch, dtype):
-            resolved_dtype = getattr(torch, dtype)
-        else:
-            resolved_dtype = dtype
+        # DeBERTa-v2/v3 has a known fp16 bug: rel_embeddings stays fp32 while
+        # LayerNorm casts to fp16, causing "expected Half but found Float" in
+        # get_rel_embedding(). Model is ~900 MB — fp32 is fine on any GPU.
+        resolved_dtype = torch.float32
 
         self.tok = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
         device_map = "auto" if device == "cuda" else (device if device == "mps" else None)
-        
+
         self.mdl = AutoModelForSequenceClassification.from_pretrained(
             model_name,
-            dtype=resolved_dtype,
+            torch_dtype=resolved_dtype,
             device_map=device_map,
             local_files_only=True,
             trust_remote_code=True
@@ -641,9 +671,8 @@ def get_scorer(cfg: dict) -> Any:
     if not prefer_mock and _hf_available() and _torch_available():
         try:
             _SCORER = _HFScorer(
-                model_id=cfg["name"], 
+                model_id=cfg["name"],
                 device=device,
-                dtype=cfg.get("dtype"),
             )
             return _SCORER
         except Exception as e:

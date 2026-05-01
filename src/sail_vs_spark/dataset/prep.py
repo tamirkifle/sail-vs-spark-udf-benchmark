@@ -100,7 +100,7 @@ def prepare(
 
     rows: list[dict[str, Any]]
     used_source: str
-    if force_synthetic:
+    if force_synthetic or source == "synthetic":
         rows = _synthetic_rows(n_rows)
         used_source = "synthetic"
     else:
