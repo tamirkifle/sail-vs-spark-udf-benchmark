@@ -4,7 +4,7 @@
 profile: laptop
 hardware:
   device: auto                 # "cpu" | "mps" | "cuda" | "auto"
-  num_partitions: 2            # keep tiny so parallelism doesn't dominate
+  num_partitions: auto         # automatically resolves to SLURM cores or os.cpu_count()
 
 dataset:
   source: openbmb/UltraFeedback
@@ -23,14 +23,15 @@ models:
     name: Qwen/Qwen2.5-0.5B-Instruct
     max_new_tokens: 32
     temperature: 0.7
-    allow_mock: true           # fall back to mock if transformers missing
+    allow_mock: false          # enforce real model
   scorer:
-    # Qwen 0.5B reward model — if unavailable, use mock
-    name: Qwen/Qwen2.5-Math-RM-72B  # placeholder; mock path is used on laptop
-    prefer_mock: true          # on laptop always prefer mock scorer
+    # Small reward model for testing
+    name: OpenAssistant/reward-model-deberta-v3-large-v2
+    prefer_mock: false         # load real reward model
+    allow_mock: false          # enforce real model
   embedder:
     name: sentence-transformers/all-MiniLM-L6-v2
-    allow_mock: true
+    allow_mock: false          # enforce real model
 
 workloads:
   w0_chained:
@@ -44,6 +45,11 @@ workloads:
   w3_embedding:
     batch_size: 16
     n_queries: 5
+  w4_agentic:
+    max_iterations: 2
+    reward_threshold: 0.5
+    n_candidates: 2
+    batch_size: 8
 
 execution:
   configs: [A, B, C, D]        # A=spark-row, B=spark-pandas, C=sail-arrow, D=sail-udtf

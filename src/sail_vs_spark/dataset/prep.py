@@ -88,6 +88,16 @@ def prepare(
     out_dir.mkdir(parents=True, exist_ok=True)
     parquet_path = out_dir / "prompts.parquet"
 
+    # Strictly purge the existing parquet folder/file.
+    # Spark/Sail output is a directory. If we don't delete it, new files 
+    # are added to the old ones, causing the row count to grow (e.g. 1400 rows).
+    if parquet_path.exists():
+        import shutil
+        if parquet_path.is_dir():
+            shutil.rmtree(parquet_path)
+        else:
+            parquet_path.unlink()
+
     rows: list[dict[str, Any]]
     used_source: str
     if force_synthetic:

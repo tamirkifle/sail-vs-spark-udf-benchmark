@@ -31,7 +31,8 @@ def run_w0(spark: Any, parquet_path: str, depth: int,
     def stage(x):
         return int(x) + 1
 
-    df = spark.read.parquet(parquet_path)
+    n_part = int(spark.conf.get("spark.sql.shuffle.partitions", "2"))
+    df = spark.read.parquet(parquet_path).repartition(n_part)
     out = df
     for _ in range(depth):
         out = out.withColumn("prompt_id", stage("prompt_id"))
@@ -72,7 +73,8 @@ def run_w1(spark: Any, parquet_path: str, cfg: dict,
         pid2, resp, reward, n = wl.apply(int(pid), str(text))
         return (pid2, resp, float(reward), int(n))
 
-    df = spark.read.parquet(parquet_path)
+    n_part = int(spark.conf.get("spark.sql.shuffle.partitions", "2"))
+    df = spark.read.parquet(parquet_path).repartition(n_part)
     out = (
         df
         .withColumn("_r", best_of_n("prompt_id", "prompt_text"))
@@ -98,15 +100,70 @@ def run_w2(spark: Any, parquet_path: str, cfg: dict,
 
     @udf(returnType=StringType())
     def gen_one(text):
-        from sail_vs_spark.workloads.w2_batched import W2Batched
-        wl = W2Batched()
-        wl.init(closure_cfg)
-        _, resp = wl.apply(0, str(text))
+        if not hasattr(gen_one, "_timer"):
+            from sail_vs_spark.profiling.boundary_timer import BoundaryTimer
+            gen_one._timer = BoundaryTimer("config_a", enable_tracing=True)
+            gen_one._row_count = 0
+            
+        with gen_one._timer.measure("UDF_ROW_EXECUTION"):
+            from sail_vs_spark.workloads.w2_batched import W2Batched
+            wl = W2Batched()
+            wl.init(closure_cfg)
+            _, resp = wl.apply(0, str(text))
+            
+        gen_one._row_count += 1
+        if gen_one._row_count % 10 == 0:
+            import os
+            gen_one._timer.save_trace(f"/tmp/sail_traces/trace_{os.getpid()}.jsonl")
         return resp
 
-    df = spark.read.parquet(parquet_path)
+    n_part = int(spark.conf.get("spark.sql.shuffle.partitions", "2"))
+    df = spark.read.parquet(parquet_path).repartition(n_part)
     out = df.withColumn("response", gen_one("prompt_text")) \
             .select("prompt_id", "response")
+    out.write.mode("overwrite").parquet(output_parquet)
+    return spark.read.parquet(output_parquet).count()
+
+
+# ── W4 — Agentic loop via Row UDFs (JVM boundary paid per generate+score call)
+def run_w4(spark: Any, parquet_path: str, cfg: dict,
+           output_parquet: str) -> int:
+    from pyspark.sql.functions import struct, udf
+    from pyspark.sql.types import (FloatType, IntegerType, LongType, StringType,
+                                    StructField, StructType)
+
+    schema = StructType([
+        StructField("prompt_id", LongType(), False),
+        StructField("final_response", StringType(), False),
+        StructField("iterations", IntegerType(), False),
+        StructField("best_reward", FloatType(), False),
+    ])
+    w4_cfg = cfg.get("workloads", {}).get("w4_agentic", {})
+    max_iter = int(w4_cfg.get("max_iterations", 3))
+    threshold = float(w4_cfg.get("reward_threshold", 0.5))
+    ncands = int(w4_cfg.get("n_candidates", 2))
+    closure_cfg = {
+        "models": cfg.get("models", {}),
+        "hardware": cfg.get("hardware", {}),
+    }
+
+    @udf(returnType=schema)
+    def agentic(pid, text):
+        from sail_vs_spark.workloads.w4_agentic import W4Agentic
+        wl = W4Agentic(max_iterations=max_iter, reward_threshold=threshold,
+                       n_candidates=ncands)
+        wl.init(closure_cfg)
+        pid2, resp, iters, reward = wl.apply(int(pid), str(text))
+        return (pid2, resp, iters, float(reward))
+
+    n_part = int(spark.conf.get("spark.sql.shuffle.partitions", "2"))
+    df = spark.read.parquet(parquet_path).repartition(n_part)
+    out = (
+        df
+        .withColumn("_r", agentic("prompt_id", "prompt_text"))
+        .select("_r.prompt_id", "_r.final_response",
+                "_r.iterations", "_r.best_reward")
+    )
     out.write.mode("overwrite").parquet(output_parquet)
     return spark.read.parquet(output_parquet).count()
 
@@ -137,7 +194,8 @@ def run_w3(spark: Any, parquet_path: str, cfg: dict,
         wl.init(closure_cfg)
         return wl.apply(int(pid), str(text))
 
-    df = spark.read.parquet(parquet_path)
+    n_part = int(spark.conf.get("spark.sql.shuffle.partitions", "2"))
+    df = spark.read.parquet(parquet_path).repartition(n_part)
     out = (
         df
         .withColumn("_r", embed_sim("prompt_id", "prompt_text"))

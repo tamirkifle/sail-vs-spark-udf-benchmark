@@ -1,6 +1,0 @@
-run_id,workload,execution,depth,wall_clock_sec,output_rows,avg_cpu_pct,peak_rss_mb,peak_host_ram_gb,avg_gpu_util_pct,peak_gpu_util_pct,avg_gpu_power_w,peak_gpu_mem_used_mb,pipeline_continuity,bytes_written_delta,mb_written_delta,write_throughput_mb_s
-live_w0_A_d2,w0,A,2,3.53,100,0.8,92.27,6.46,0.0,0.0,0.0,0.0,0.0,0,0.0,0.0
-live_w1_B,w1,B,,4.086,100,0.86,81.9,6.51,0.0,0.0,0.0,0.0,0.0,0,0.0,0.0
-smoke_w0_A_d2,w0,A,2,3.177,100,0.67,86.1,5.87,0.0,0.0,0.0,0.0,0.0,0,0.0,0.0
-smoke_w0_A_d3,w0,A,3,3.746,100,0.82,86.28,6.53,0.0,0.0,0.0,0.0,0.0,0,0.0,0.0
-smoke_w1_B,w1,B,,3.541,100,0.7,99.45,5.7,0.0,0.0,0.0,0.0,0.0,0,0.0,0.0

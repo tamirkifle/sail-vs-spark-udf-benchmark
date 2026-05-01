@@ -58,15 +58,19 @@ class BoundaryTimer:
         "SIMILARITY",
         "TRIVIAL_COMPUTE",
         "DATA_TRANSFER_OUT",
+        "UDF_BATCH_EXECUTION",
+        "UDF_ROW_EXECUTION",
         "OTHER",
     )
 
-    def __init__(self, config_name: str) -> None:
+    def __init__(self, config_name: str, enable_tracing: bool = False) -> None:
         self.config_name = config_name
+        self.enable_tracing = enable_tracing
         self._lock = threading.Lock()
         self._totals: dict[str, float] = defaultdict(float)
         self._counts: dict[str, int] = defaultdict(int)
         self._samples: dict[str, list[float]] = defaultdict(list)
+        self._trace_events: list[dict[str, Any]] = []
         self._job_start = time.perf_counter()
 
     # ── Pickle support ────────────────────────────────────────────────────
@@ -82,15 +86,18 @@ class BoundaryTimer:
 
     # ── Span context manager ──────────────────────────────────────────────
     class _Span:
-        __slots__ = ("_parent", "_phase", "_t0")
+        __slots__ = ("_parent", "_phase", "_t0", "_wall_t0")
 
         def __init__(self, parent: "BoundaryTimer", phase: str) -> None:
             self._parent = parent
             self._phase = phase
             self._t0: float | None = None
+            self._wall_t0: float | None = None
 
         def __enter__(self) -> "BoundaryTimer._Span":
             self._t0 = time.perf_counter()
+            if self._parent.enable_tracing:
+                self._wall_t0 = time.time()
             return self
 
         def __exit__(self, *_: Any) -> None:
@@ -99,6 +106,17 @@ class BoundaryTimer:
                 self._parent._totals[self._phase] += elapsed
                 self._parent._counts[self._phase] += 1
                 self._parent._samples[self._phase].append(elapsed)
+                if self._parent.enable_tracing and self._wall_t0 is not None:
+                    import threading, os
+                    self._parent._trace_events.append({
+                        "name": self._phase,
+                        "cat": "benchmark",
+                        "ph": "X",
+                        "ts": self._wall_t0 * 1_000_000, # microseconds
+                        "dur": elapsed * 1_000_000,
+                        "pid": os.getpid(),
+                        "tid": threading.get_ident()
+                    })
 
     def measure(self, phase: str) -> "BoundaryTimer._Span":
         if phase not in self.PHASES:
@@ -113,7 +131,18 @@ class BoundaryTimer:
             self._totals[phase] += elapsed_sec
             self._counts[phase] += 1
             self._samples[phase].append(elapsed_sec)
-
+            if self.enable_tracing:
+                import threading, os
+                wall_now = time.time()
+                self._trace_events.append({
+                    "name": phase,
+                    "cat": "benchmark",
+                    "ph": "X",
+                    "ts": (wall_now - elapsed_sec) * 1_000_000,
+                    "dur": elapsed_sec * 1_000_000,
+                    "pid": os.getpid(),
+                    "tid": threading.get_ident()
+                })
 
     # ── Merging (for aggregating timers from multiple workers) ────────────
     def merge_from_dict(self, other: dict) -> None:
@@ -127,13 +156,27 @@ class BoundaryTimer:
                 self._counts[phase] += int(count)
             for phase, samples in (other.get("_samples") or {}).items():
                 self._samples[phase].extend(float(x) for x in samples)
+            if self.enable_tracing and "_trace_events" in other:
+                self._trace_events.extend(other["_trace_events"])
 
     def export_raw(self) -> dict:
         return {
             "_totals": dict(self._totals),
             "_counts": dict(self._counts),
             "_samples": {k: list(v) for k, v in self._samples.items()},
+            "_trace_events": list(self._trace_events),
         }
+
+    def save_trace(self, path: str | Path) -> None:
+        """Save timeline trace to Chrome Trace Event format (JSON Lines)."""
+        if not self.enable_tracing or not self._trace_events:
+            return
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as fh:
+            for event in self._trace_events:
+                fh.write(json.dumps(event) + "\n")
+        self._trace_events.clear() # clear after saving to avoid double-writing
 
     # ── Percentile helper ─────────────────────────────────────────────────
     @staticmethod

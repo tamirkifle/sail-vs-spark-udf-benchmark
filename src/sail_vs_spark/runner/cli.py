@@ -42,6 +42,18 @@ def _apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
     # Dataset rows override
     if args.n_rows is not None:
         cfg.setdefault("dataset", {})["n_rows"] = int(args.n_rows)
+        
+    # Auto-resolve num_partitions to available CPU cores if set to "auto"
+    hw = cfg.setdefault("hardware", {})
+    if str(hw.get("num_partitions")).lower() == "auto":
+        import os
+        try:
+            # Respects cpuset on Linux (like SLURM task allocations)
+            cores = len(os.sched_getaffinity(0))
+        except AttributeError:
+            cores = os.cpu_count() or 8
+        hw["num_partitions"] = cores
+        
     return cfg
 
 
@@ -80,6 +92,7 @@ def _make_session(execution: str, cfg: dict) -> Any:
 
 
 def run_one(
+    spark: Any,
     cfg: dict,
     workload: str,
     execution: str,
@@ -94,6 +107,12 @@ def run_one(
     run_id = run_id or f"{workload}_{execution}_{uuid.uuid4().hex[:6]}"
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    import glob, os
+    os.makedirs("/tmp/sail_traces", exist_ok=True)
+    for f in glob.glob("/tmp/sail_traces/*.jsonl"):
+        try: os.remove(f)
+        except Exception: pass
+
     # Resolve the prompts parquet path
     parquet_path = cfg["dataset"]["out_dir"] + "/prompts.parquet"
     if not Path(parquet_path).exists():
@@ -106,8 +125,8 @@ def run_one(
     manifest_json = str(results_dir / f"{run_id}_manifest.json")
 
     run_fn = _dispatch(execution, workload)
-    spark = _make_session(execution, cfg)
 
+    n_rows = None  # Initialize for finally block
     col = MetricsCollector(
         run_id, sample_interval_sec=cfg["runner"].get("sample_interval_sec", 0.5)
     )
@@ -123,8 +142,10 @@ def run_one(
     finally:
         wall = time.perf_counter() - t0
         col.stop()
+        from sail_vs_spark.runner.manifest import get_setup_description
         col.save(stats_json, extra={
             "workload": workload, "execution": execution,
+            "setup_description": get_setup_description(execution),
             "depth": int(cfg["workloads"]["w0_chained"].get("depth", 1))
                      if workload == "w0" else None,
             "wall_clock_sec": round(wall, 3),
@@ -145,17 +166,38 @@ def run_one(
         stats_json=stats_json,
     )
     save_manifest(manifest, manifest_json)
+    
+    # Collect detailed traces if they exist
+    import glob
+    import os
+    trace_events = []
+    for f in glob.glob("/tmp/sail_traces/*.jsonl"):
+        try:
+            with open(f) as fh:
+                for line in fh:
+                    if line.strip():
+                        trace_events.append(json.loads(line))
+            os.remove(f) # Clean up
+        except Exception:
+            pass
+    
+    if trace_events:
+        trace_out = str(results_dir / f"{run_id}_trace.json")
+        with open(trace_out, "w") as fh:
+            json.dump({"traceEvents": trace_events, "displayTimeUnit": "ms"}, fh, indent=2)
+        print(f"[cli] saved trace with {len(trace_events)} events to {trace_out}")
+        
     print(f"[cli] done — {run_id}  wall={wall:.2f}s  rows={n_rows}")
     return manifest
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Run one Sail-vs-Spark benchmark cell."
+        description="Run one (or more) Sail-vs-Spark benchmark cells."
     )
     p.add_argument("--config", required=True,
                    help="Path to a YAML config (config/laptop.yaml or config/gpu_h200.yaml)")
-    p.add_argument("--workload", required=True, choices=["w0", "w1", "w2", "w3"])
+    p.add_argument("--workload", required=True, choices=["w0", "w1", "w2", "w3", "w4"])
     p.add_argument("--execution", required=True, choices=["A", "B", "C", "D"])
     p.add_argument("--depth", type=int, default=None,
                    help="W0 pipeline depth override (1..3 typical).")
@@ -165,7 +207,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="Override dataset.n_rows (useful for smoke tests).")
     p.add_argument("--results-dir", default=None,
                    help="Override runner.results_dir.")
-    p.add_argument("--run-id", default=None)
+    p.add_argument("--run-id", default=None,
+                   help="Base run ID. With --samples N, IDs are <run-id>_s1 … _sN.")
+    p.add_argument("--samples", type=int, default=1,
+                   help="Number of back-to-back samples sharing the same session "
+                        "(s1=cold/setup, s2+= warm/steady). Default: 1.")
 
     args = p.parse_args(argv)
     cfg = _load_cfg(args.config)
@@ -174,8 +220,18 @@ def main(argv: list[str] | None = None) -> int:
     results_dir = Path(
         args.results_dir or cfg.get("runner", {}).get("results_dir", "results/")
     )
-    run_one(cfg, args.workload, args.execution,
-            results_dir=results_dir, run_id=args.run_id)
+
+    # Create the session once and share it across all samples so that
+    # Spark Python workers (worker.reuse=true) keep model state warm for s2+.
+    spark = _make_session(args.execution, cfg)
+
+    n_samples = max(1, args.samples)
+    base_id = args.run_id or f"{args.workload}_{args.execution}"
+    for i in range(1, n_samples + 1):
+        rid = f"{base_id}_s{i}"
+        run_one(spark, cfg, args.workload, args.execution,
+                results_dir=results_dir, run_id=rid)
+
     return 0
 
 

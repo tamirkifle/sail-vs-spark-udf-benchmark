@@ -1,6 +1,0 @@
-{
-  "source": "synthetic",
-  "n_rows": 100,
-  "split": "train",
-  "parquet_path": "data/laptop/prompts.parquet"
-}

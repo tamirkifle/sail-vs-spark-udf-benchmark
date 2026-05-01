@@ -17,16 +17,17 @@ dataset:
   out_dir: data/gpu
 
 models:
-  # Generator pinned to FP8 quant that fits in 141 GB VRAM per the spec.
-  # Actual model string may vary with the Qwen release calendar — override
-  # via --model-generator on the CLI if needed.
+  # Generator served by vLLM (start_vllm_server.sh). vLLM handles FP8
+  # quantization internally — no finegrained-fp8/causal-conv1d kernels needed.
   generator:
     name: Qwen/Qwen3.5-122B-A10B-FP8
     fallback_name: Qwen/Qwen2.5-7B-Instruct   # if 122B FP8 unavailable
     max_new_tokens: 128
     temperature: 0.7
-    dtype: float8_e4m3fn
-    use_vllm: true
+    top_k: 50
+    top_p: 0.9
+    # server_url: set via VLLM_BASE_URL env var by start_vllm_server.sh
+    server_url: ""
     allow_mock: false
   scorer:
     name: OpenAssistant/reward-model-deberta-v3-large-v2
@@ -35,6 +36,14 @@ models:
   embedder:
     name: BAAI/bge-large-en-v1.5
     allow_mock: false
+
+vllm:
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 8192
+  quantization: fp8
+  port: 8000
+  host: "127.0.0.1"
 
 workloads:
   w0_chained:
@@ -48,6 +57,11 @@ workloads:
   w3_embedding:
     batch_size: 256
     n_queries: 50
+  w4_agentic:
+    max_iterations: 3
+    reward_threshold: 0.5
+    n_candidates: 2
+    batch_size: 16
 
 execution:
   configs: [A, B, C, D]

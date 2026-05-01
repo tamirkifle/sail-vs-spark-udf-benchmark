@@ -137,16 +137,17 @@ CPU or MPS.
 
 ### 3.1 One-time setup
 
-Use the pyspark+pysail venv that already lives under the sail repo:
+Create a local virtual environment and install the benchmark package along with its dependencies:
 
 ```bash
-VENV=/Users/tamir/Documents/MyCode/LakeSail/sail/.venvs/default
-source $VENV/bin/activate
-cd /Users/tamir/Documents/MyCode/LakeSail/sail_vs_spark_benchmark
+cd sail_vs_spark_benchmark
 
-# install the package + test deps into that venv
-pip install -e .
-pip install -r requirements.txt
+# 1. Create .venv and install base dependencies (pyspark, etc.)
+make install
+
+# 2. Setup Sail v0.6.0 from your local Sail repository
+# This will checkout the v0.6.0 tag and build pysail into the local .venv
+make setup-sail SAIL_REPO_DIR=~/Documents/MyCode/LakeSail/sail
 ```
 
 You don't need `torch` or `transformers` to exercise the scaffolding —
@@ -154,7 +155,7 @@ the loaders fall back to mocks automatically. If you want real models,
 install them separately:
 
 ```bash
-pip install torch transformers sentence-transformers
+.venv/bin/pip install torch transformers sentence-transformers
 ```
 
 ### 3.2 Prepare the dataset
