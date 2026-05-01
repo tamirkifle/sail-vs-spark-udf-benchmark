@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+from html import escape
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,11 +26,19 @@ EXECUTION_LABELS = {
 }
 
 WORKLOAD_DESCRIPTIONS = {
-    "W0": "Chained no-op transforms at variable recursion depth. Isolates pure orchestration overhead and quantifies the accumulated cost of repeated engine–Python boundary crossings.",
+    "W0": "Repeated trivial transforms at configurable depth. Isolates pure orchestration overhead and quantifies the cost of repeating the same engine–Python boundary crossing multiple times.",
     "W1": "Best-of-N generation with reward-model scoring. N candidates are generated per prompt and ranked; the highest-scoring response is returned.",
     "W2": "Repeated batched generation across a fixed prompt corpus. Measures sustained throughput under steady-state engine and GPU load.",
     "W3": "Batch embedding with vector similarity computation. Exercises model calls that return dense numerical outputs rather than token sequences.",
     "W4": "Multi-step agentic loop: generate, evaluate, and conditionally repeat until a quality threshold is met. Models iterative inference flows with variable iteration count.",
+}
+
+WORKLOAD_LABELS = {
+    "W0": "Chained Transforms",
+    "W1": "Best-of-N Generation",
+    "W2": "Batched Generation",
+    "W3": "Embedding Pipeline",
+    "W4": "Agentic Loop",
 }
 
 CONFIG_DESCRIPTIONS = {
@@ -69,11 +78,8 @@ TRACE_PHASES_OF_INTEREST = {
 }
 
 PLOT_SCRIPTS = [
-    "analysis/plot_overhead_breakdown.py",
-    "analysis/plot_speedup.py",
     "analysis/plot_depth_runtime.py",
     "analysis/plot_gpu_timeline.py",
-    "analysis/plot_memory.py",
     "analysis/plot_disk_io.py",
     "analysis/plot_serialization.py",
 ]
@@ -352,8 +358,10 @@ def _build_summary_df(run_df: pd.DataFrame) -> pd.DataFrame:
     if summary_df.empty:
         return summary_df
 
+    baseline_config = "B"
+
     def _speedup(row: pd.Series) -> float:
-        mask = (summary_df["Workload"] == row["Workload"]) & (summary_df["Config"] == "A")
+        mask = (summary_df["Workload"] == row["Workload"]) & (summary_df["Config"] == baseline_config)
         if pd.isna(row["Depth"]):
             mask &= summary_df["Depth"].isna()
         else:
@@ -474,6 +482,130 @@ def _render_flow_mermaid(steps: list[str], accent: str, edge_label_bg: str) -> s
     return f'<div class="mermaid">\n{init}\n{body}\n</div>'
 
 
+def _render_w1_mermaid() -> str:
+    accent = "#3762e0"
+    edge_label_bg = "#eff4ff"
+    init = _mermaid_init(accent, edge_label_bg)
+    body = (
+        "flowchart LR\n"
+        f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef done fill:#dbeafe,stroke:{accent},stroke-width:2.8px,color:#0f172a,font-weight:700\n"
+        "\n"
+        "    P([Prompt]):::box --> G([Generate N candidates]):::box --> S([Score candidates]):::box --> D{Best candidate<br/>meets threshold?}:::gate\n"
+        "    D -- yes --> F([Return best response]):::done\n"
+        "    D -- no --> R([Regenerate / widen beam]):::box --> G\n"
+    )
+    return f'<div class="mermaid">\n{init}\n{body}\n</div>'
+
+
+def _render_w0_mermaid() -> str:
+    accent = "#3762e0"
+    edge_label_bg = "#eff4ff"
+    init = _mermaid_init(accent, edge_label_bg)
+    body = (
+        "flowchart LR\n"
+        f"    classDef box fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef done fill:#dbeafe,stroke:{accent},stroke-width:2.8px,color:#0f172a,font-weight:700\n"
+        "\n"
+        "    I([Input row]):::box --> S([Add 1]):::box --> O([Output row]):::done\n"
+        "    D([Depth = repeat count]):::gate -.->|apply the same step N times| S\n"
+    )
+    return f'<div class="mermaid">\n{init}\n{body}\n</div>'
+
+
+def _render_config_mermaid(code: str) -> str:
+    palette = {
+        "A": ("#e25a1c", "#fff7ed"),
+        "B": ("#e25a1c", "#fff7ed"),
+        "C": ("#3762e0", "#eff6ff"),
+        "D": ("#3762e0", "#eff6ff"),
+    }
+    accent, edge_label_bg = palette[code]
+    init = (
+        "%%{init: {'theme': 'base', 'flowchart': {'nodeSpacing': 62, 'rankSpacing': 72}, 'themeVariables': {"
+        "'primaryColor': '#ffffff',"
+        "'primaryBorderColor': '" + accent + "',"
+        "'primaryTextColor': '#0f172a',"
+        "'lineColor': '" + accent + "',"
+        "'edgeLabelBackground': '" + edge_label_bg + "',"
+        "'fontSize': '17px'"
+        "}}}%%"
+    )
+    if code == "A":
+        body = (
+            "flowchart LR\n"
+            f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            "\n"
+            "    E([Spark executor]):::box --> R([Serialize row with pickle]):::box --> P([Python worker]):::box --> M([Run model per row]):::box --> O([Deserialize result]):::box --> E\n"
+            "    R -.->|one row at a time| P\n"
+        )
+    elif code == "B":
+        body = (
+            "flowchart LR\n"
+            f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            "\n"
+            "    E([Spark executor]):::box --> A([Bundle Arrow batches]):::box --> S([Socket hop to Python]):::box --> U([Pandas UDF]):::box --> B([Arrow batch return]):::box --> E\n"
+            "    S -.->|batch boundary| U\n"
+        )
+    elif code == "C":
+        body = (
+            "flowchart LR\n"
+            f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            "\n"
+            "    E([Sail engine]):::box --> A([Arrow batch]):::box --> H([Shared-memory handoff]):::box --> P([Python batch apply]):::box --> R([Zero-copy return]):::box --> E\n"
+            "    H -.->|no socket hop| P\n"
+        )
+    else:
+        body = (
+            "flowchart LR\n"
+            f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+            "\n"
+            "    E([Sail engine]):::box --> Q([SQL plan / UDTF]):::box --> B([Buffered Python batch]):::box --> R([Rows back to engine]):::box --> E\n"
+            "    Q -.->|engine orchestrates batching| B\n"
+    )
+    return f'<div class="mermaid">\n{init}\n{body}\n</div>'
+
+
+def _render_w2_mermaid() -> str:
+    accent = "#3762e0"
+    edge_label_bg = "#eff4ff"
+    init = _mermaid_init(accent, edge_label_bg)
+    body = (
+        "flowchart LR\n"
+        f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef done fill:#dbeafe,stroke:{accent},stroke-width:2.8px,color:#0f172a,font-weight:700\n"
+        "\n"
+        "    P([Prompt corpus]):::box --> B([Batch prompts]):::box --> G([Generate batched responses]):::box --> C([Collect response rows]):::box --> W([Write results]):::done\n"
+        "    B -.->|fixed batch size| G\n"
+        "    G -.->|single response per prompt| C\n"
+    )
+    return f'<div class="mermaid">\n{init}\n{body}\n</div>'
+
+
+def _render_w3_mermaid() -> str:
+    accent = "#3762e0"
+    edge_label_bg = "#eff4ff"
+    init = _mermaid_init(accent, edge_label_bg)
+    body = (
+        "flowchart LR\n"
+        f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
+        f"    classDef done fill:#dbeafe,stroke:{accent},stroke-width:2.8px,color:#0f172a,font-weight:700\n"
+        "\n"
+        "    P([Prompt batch]):::box --> E([Tokenize / embed]):::box --> S([Compare to reference examples]):::box --> A([Pick best match]):::box --> O([Best match result]):::done\n"
+        "    R([Reference examples]):::box --> S\n"
+        "    S -.->|find strongest match| A\n"
+    )
+    return f'<div class="mermaid">\n{init}\n{body}\n</div>'
+
+
 def _render_agentic_mermaid() -> str:
     accent = "#3762e0"
     edge_label_bg = "#eff4ff"
@@ -488,7 +620,7 @@ def _render_agentic_mermaid() -> str:
         "}}}%%"
     )
     body = (
-        "flowchart TB\n"
+        "flowchart LR\n"
         f"    classDef box  fill:#ffffff,stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
         f"    classDef gate fill:{edge_label_bg},stroke:{accent},stroke-width:2.4px,color:#0f172a\n"
         f"    classDef done fill:#dbeafe,stroke:{accent},stroke-width:2.8px,color:#0f172a,font-weight:700\n"
@@ -501,20 +633,21 @@ def _render_agentic_mermaid() -> str:
 
 
 def _render_workload_svg(code: str) -> str:
+    if code == "W0":
+        return _render_w0_mermaid()
+    if code == "W1":
+        return _render_w1_mermaid()
+    if code == "W2":
+        return _render_w2_mermaid()
+    if code == "W3":
+        return _render_w3_mermaid()
     if code == "W4":
         return _render_agentic_mermaid()
     return _render_flow_mermaid(WORKLOAD_SPECS[code], accent="#3762e0", edge_label_bg="#eff4ff")
 
 
 def _render_config_svg(code: str) -> str:
-    palette = {
-        "A": ("#e25a1c", "#fff7ed"),
-        "B": ("#e25a1c", "#fff7ed"),
-        "C": ("#3762e0", "#eff6ff"),
-        "D": ("#3762e0", "#eff6ff"),
-    }
-    accent, edge_label_bg = palette[code]
-    return _render_flow_mermaid(CONFIG_SPECS[code], accent=accent, edge_label_bg=edge_label_bg)
+    return _render_config_mermaid(code)
 
 
 def _load_report_context(results_dir: Path) -> dict[str, Any]:
@@ -529,6 +662,7 @@ def _load_report_context(results_dir: Path) -> dict[str, Any]:
         workloads.append(
             {
                 "code": code,
+                "label": WORKLOAD_LABELS[code],
                 "description": WORKLOAD_DESCRIPTIONS[code],
                 "svg": _render_workload_svg(code),
             }
@@ -563,7 +697,17 @@ def _load_report_context(results_dir: Path) -> dict[str, Any]:
         model_specs.append({"role": key.title(), "name": info.get("name", "-"), "details": info})
     workload_knobs = []
     for key, cfg in (manifest.get("workload_config") or {}).items():
-        workload_knobs.append({"name": key, "json": json.dumps(cfg, separators=(", ", ": "))})
+        title = key.replace("_", " ").title()
+        badge = key.split("_", 1)[0].upper()
+        params = [{"key": k, "value": v} for k, v in cfg.items()]
+        workload_knobs.append(
+            {
+                "name": title,
+                "code": key,
+                "badge": badge,
+                "params": params,
+            }
+        )
     return {
         "experiment_blurb": "Five AI inference workloads are executed across four execution configurations, isolating the cost of data serialization, engine-to-Python boundary crossings, and framework overhead from net model compute time.",
         "workloads": workloads,
@@ -594,13 +738,877 @@ def _build_tel_cards(rows: pd.DataFrame) -> tuple[list[dict], dict]:
     return cards, tel_maxes
 
 
-def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
+def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
+    configs = ["A", "B", "C", "D"]
+    if run_df.empty:
+        return {
+            "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+            "workloads": [],
+            "maxWallSec": 0.0,
+        }
+
+    rows = run_df[["Workload", "Config", "WallTime", "UDFTime_sec"]].copy()
+    rows["Overhead_sec"] = rows.apply(
+        lambda row: max(0.0, float(row["WallTime"]) - float(row["UDFTime_sec"])),
+        axis=1,
+    )
+    agg = (
+        rows.groupby(["Workload", "Config"], dropna=False, as_index=False)
+        .mean(numeric_only=True)
+        .sort_values(["Workload", "Config"])
+    )
+
+    workloads: list[dict[str, Any]] = []
+    for workload in sorted(agg["Workload"].unique()):
+        workload_df = agg[agg["Workload"] == workload].copy()
+        workload_df["Config"] = pd.Categorical(
+            workload_df["Config"], categories=configs, ordered=True
+        )
+        workload_df = workload_df.sort_values("Config")
+        bars = []
+        for _, row in workload_df.iterrows():
+            config = str(row["Config"])
+            bars.append(
+                {
+                    "config": config,
+                    "label": get_label(config),
+                    "wall_sec": round(float(row["WallTime"]), 6),
+                    "udf_sec": round(float(row["UDFTime_sec"]), 6),
+                    "overhead_sec": round(float(row["Overhead_sec"]), 6),
+                }
+            )
+        workloads.append({"workload": workload, "bars": bars})
+
+    max_wall = float(agg["WallTime"].max()) if not agg.empty else 0.0
+    return {
+        "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+        "workloads": workloads,
+        "maxWallSec": round(max_wall, 6),
+    }
+
+
+def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
+    payload_json = json.dumps(chart_data, ensure_ascii=True).replace("</", "<\\/")
+    legend_html = []
+    for item in chart_data.get("configs", []):
+        code = escape(str(item.get("code", "")))
+        label = escape(str(item.get("label", "")))
+        legend_html.append(
+            f'<span class="overhead-config-pill"><strong>{code}</strong><span>{label}</span></span>'
+        )
+    legend_markup = "".join(legend_html)
+    return """
+<div class="card overhead-card">
+  <h2>Overhead Breakdown</h2>
+  <p class="section-note">This D3-based view keeps the original decomposition but packages it as an interactive HTML chart. Each panel shows mean wall time per execution config, stacked into traced UDF compute and residual framework overhead.</p>
+  <div class="overhead-legend">
+    <div class="overhead-legend-group">
+      <span class="overhead-legend-title">Execution configs</span>
+      <div class="overhead-config-grid">__LEGEND__</div>
+    </div>
+    <div class="overhead-legend-group">
+      <span class="overhead-legend-title">Stacked components</span>
+      <div class="overhead-component-grid">
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-udf"></span>Traced UDF compute</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-overhead"></span>Framework overhead</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-total"></span>Total wall time label</span>
+      </div>
+    </div>
+  </div>
+  <div class="overhead-chart-shell">
+    <script type="application/json" id="overhead-breakdown-data">__PAYLOAD__</script>
+    <div id="overhead-breakdown-chart" class="overhead-chart-grid"></div>
+  </div>
+</div>
+<style>
+  .overhead-card { border: 1px solid #dbe7ff; background: linear-gradient(180deg, rgba(255,255,255,0.98), #f8fafc); }
+  .overhead-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 10px 0 16px; }
+  .overhead-legend-group { border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; padding: 12px 14px; }
+  .overhead-legend-title { display: block; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b; margin-bottom: 10px; }
+  .overhead-config-grid, .overhead-component-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .overhead-config-pill, .overhead-component-pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 999px; border: 1px solid #e2e8f0; background: #f8fafc; color: #334155; font-size: 12px; line-height: 1.1; }
+  .overhead-config-pill strong { color: #0f172a; }
+  .overhead-config-pill span { white-space: nowrap; }
+  .overhead-swatch { width: 11px; height: 11px; border-radius: 999px; display: inline-block; flex: 0 0 auto; }
+  .overhead-udf { background: #2f9e44; }
+  .overhead-overhead { background: #e25a1c; }
+  .overhead-total { background: #94a3b8; }
+  .overhead-chart-shell { margin-top: 6px; }
+  .overhead-chart-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .overhead-panel { border: 1px solid #e2e8f0; border-radius: 16px; background: linear-gradient(180deg, #fff, #f8fafc); padding: 14px 14px 12px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04); }
+  .overhead-panel h3 { margin: 0; font-size: 16px; color: #0f172a; }
+  .overhead-panel .subtitle { margin: 3px 0 10px; font-size: 12px; color: #64748b; }
+  .overhead-svg { width: 100%; height: auto; display: block; }
+  .overhead-axis text { fill: #475569; font-size: 11px; }
+  .overhead-axis path, .overhead-axis line { stroke: #cbd5e1; }
+  .overhead-grid line { stroke: #e2e8f0; stroke-dasharray: 3 4; }
+  .overhead-bar:hover .overhead-hit { fill: rgba(15, 23, 42, 0.03); }
+  .overhead-tooltip { position: fixed; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: rgba(15, 23, 42, 0.96); color: #f8fafc; border-radius: 12px; padding: 10px 12px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22); font-size: 12px; line-height: 1.45; max-width: 260px; }
+  .overhead-tooltip strong { display: block; font-size: 13px; margin-bottom: 4px; color: #fff; }
+  .overhead-tooltip .metric { display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; }
+  .overhead-tooltip .metric span:first-child { color: #cbd5e1; }
+  .overhead-empty { padding: 20px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #475569; background: #fff; }
+  @media (max-width: 760px) {
+    .overhead-legend { grid-template-columns: 1fr; }
+  }
+</style>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  const dataNode = document.getElementById("overhead-breakdown-data");
+  const chartNode = document.getElementById("overhead-breakdown-chart");
+  if (!dataNode || !chartNode || typeof d3 === "undefined") {
+    return;
+  }
+
+  const payload = JSON.parse(dataNode.textContent);
+  const tooltip = d3.select("body").selectAll(".overhead-tooltip")
+    .data([null])
+    .join("div")
+    .attr("class", "overhead-tooltip");
+
+  const palette = {
+    udf: "#2f9e44",
+    overhead: "#e25a1c",
+    grid: "#e2e8f0",
+    axis: "#94a3b8",
+  };
+
+  function formatSeconds(value) {
+    if (!Number.isFinite(value)) {
+      return "-";
+    }
+    return value >= 1 ? `${value.toFixed(2)}s` : `${value.toFixed(3)}s`;
+  }
+
+  function hideTooltip() {
+    tooltip.style("opacity", 0);
+  }
+
+  function showTooltip(event, datum) {
+    tooltip
+      .style("opacity", 1)
+      .html(`
+        <strong>${datum.workload} · Config ${datum.config}</strong>
+        <div class="metric"><span>UDF compute</span><span>${formatSeconds(datum.udf_sec)}</span></div>
+        <div class="metric"><span>Framework overhead</span><span>${formatSeconds(datum.overhead_sec)}</span></div>
+        <div class="metric"><span>Total wall time</span><span>${formatSeconds(datum.wall_sec)}</span></div>
+      `);
+
+    const pad = 18;
+    const rect = tooltip.node().getBoundingClientRect();
+    let left = event.clientX + 16;
+    let top = event.clientY + 16;
+    if (left + rect.width + pad > window.innerWidth) {
+      left = event.clientX - rect.width - 16;
+    }
+    if (top + rect.height + pad > window.innerHeight) {
+      top = event.clientY - rect.height - 16;
+    }
+    tooltip.style("left", `${Math.max(8, left)}px`).style("top", `${Math.max(8, top)}px`);
+  }
+
+  function render() {
+    chartNode.innerHTML = "";
+    if (!payload.workloads || payload.workloads.length === 0) {
+      chartNode.innerHTML = '<div class="overhead-empty">No overhead timing data was found for this run.</div>';
+      return;
+    }
+
+    const containerWidth = chartNode.getBoundingClientRect().width || chartNode.clientWidth || 960;
+    const minPanelWidth = 300;
+    const gap = 16;
+    const cols = Math.max(1, Math.min(3, Math.floor((containerWidth + gap) / minPanelWidth)));
+    chartNode.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+
+    const panelWidth = (containerWidth - gap * (cols - 1)) / cols;
+    const panelHeight = 286;
+    const margin = { top: 26, right: 14, bottom: 38, left: 46 };
+    const innerWidth = Math.max(180, panelWidth - margin.left - margin.right);
+    const innerHeight = panelHeight - margin.top - margin.bottom;
+    const maxWall = Math.max(3.0, (payload.maxWallSec || 0) * 1.25);
+    const yScale = d3.scaleSymlog().constant(0.02).domain([0, maxWall]).nice().range([innerHeight, 0]);
+    const xScale = d3.scaleBand().domain(payload.configs.map((d) => d.code)).range([0, innerWidth]).padding(0.24);
+    const barWidth = xScale.bandwidth();
+
+    const svgWidth = innerWidth + margin.left + margin.right;
+    const svgHeight = panelHeight;
+
+    payload.workloads.forEach((workload) => {
+      const panel = chartNode.appendChild(document.createElement("div"));
+      panel.className = "overhead-panel";
+      panel.innerHTML = `<h3>${workload.workload}</h3><div class="subtitle">Mean wall time per execution config</div>`;
+
+      const svg = d3.select(panel)
+        .append("svg")
+        .attr("class", "overhead-svg")
+        .attr("viewBox", `0 0 ${svgWidth} ${svgHeight}`)
+        .attr("role", "img")
+        .attr("aria-label", `Overhead breakdown for workload ${workload.workload}`);
+
+      const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+      g.append("g")
+        .attr("class", "overhead-grid")
+        .call(d3.axisLeft(yScale).ticks(4).tickSize(-innerWidth).tickFormat(""))
+        .selectAll("line")
+        .attr("stroke", palette.grid);
+
+      g.append("g")
+        .attr("class", "overhead-axis")
+        .call(d3.axisLeft(yScale).ticks(4).tickFormat((d) => formatSeconds(d)));
+
+      g.append("g")
+        .attr("class", "overhead-axis")
+        .attr("transform", `translate(0,${innerHeight})`)
+        .call(d3.axisBottom(xScale).tickSizeOuter(0));
+
+      const barGroups = g.selectAll(".overhead-bar")
+        .data(workload.bars)
+        .join("g")
+        .attr("class", "overhead-bar")
+        .attr("transform", (d) => `translate(${xScale(d.config)},0)`);
+
+      barGroups.append("rect")
+        .attr("class", "overhead-hit")
+        .attr("x", 0)
+        .attr("y", 0)
+        .attr("width", barWidth)
+        .attr("height", innerHeight)
+        .attr("fill", "transparent")
+        .on("pointerenter", function(event, d) {
+          d3.select(this.parentNode).selectAll("rect.segment").attr("opacity", 0.92);
+          showTooltip(event, d);
+        })
+        .on("pointermove", function(event, d) {
+          showTooltip(event, d);
+        })
+        .on("pointerleave", function() {
+          d3.select(this.parentNode).selectAll("rect.segment").attr("opacity", 1);
+          hideTooltip();
+        });
+
+      barGroups.append("rect")
+        .attr("class", "segment")
+        .attr("x", 0)
+        .attr("y", (d) => yScale(d.udf_sec))
+        .attr("width", barWidth)
+        .attr("height", (d) => Math.max(0, innerHeight - yScale(d.udf_sec)))
+        .attr("fill", palette.udf);
+
+      barGroups.append("rect")
+        .attr("class", "segment")
+        .attr("x", 0)
+        .attr("y", (d) => yScale(d.wall_sec))
+        .attr("width", barWidth)
+        .attr("height", (d) => Math.max(0, yScale(d.udf_sec) - yScale(d.wall_sec)))
+        .attr("fill", palette.overhead);
+
+      barGroups.append("text")
+        .attr("x", barWidth / 2)
+        .attr("y", (d) => Math.max(12, yScale(d.wall_sec) - 8))
+        .attr("text-anchor", "middle")
+        .attr("fill", palette.axis)
+        .attr("font-size", 11)
+        .attr("font-weight", 700)
+        .text((d) => formatSeconds(d.wall_sec));
+    });
+  }
+
+  render();
+
+  if ("ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => {
+      window.requestAnimationFrame(render);
+    });
+    observer.observe(chartNode);
+  } else {
+    window.addEventListener("resize", render);
+  }
+})();
+</script>
+""".replace("__PAYLOAD__", payload_json).replace("__LEGEND__", legend_markup)
+
+
+def _build_memory_payload(run_df: pd.DataFrame) -> dict[str, Any]:
+    configs = ["A", "B", "C", "D"]
+    if run_df.empty:
+        return {
+            "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+            "workloads": [],
+            "maxPeakRssMb": 0.0,
+        }
+
+    rows = run_df[["Workload", "Config", "PeakRSS_MB"]].copy()
+    agg = (
+        rows.groupby(["Workload", "Config"], dropna=False, as_index=False)
+        .mean(numeric_only=True)
+        .sort_values(["Workload", "Config"])
+    )
+
+    workloads: list[dict[str, Any]] = []
+    for workload in sorted(agg["Workload"].unique()):
+        workload_df = agg[agg["Workload"] == workload].copy()
+        workload_df["Config"] = pd.Categorical(
+            workload_df["Config"], categories=configs, ordered=True
+        )
+        workload_df = workload_df.sort_values("Config")
+        bars = []
+        for _, row in workload_df.iterrows():
+            config = str(row["Config"])
+            bars.append(
+                {
+                    "config": config,
+                    "label": get_label(config),
+                    "peak_rss_mb": round(float(row["PeakRSS_MB"]), 3),
+                }
+            )
+        workloads.append({"workload": workload, "bars": bars})
+
+    return {
+        "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+        "workloads": workloads,
+        "maxPeakRssMb": round(float(agg["PeakRSS_MB"].max()), 3),
+    }
+
+
+def _build_speedup_payload(run_df: pd.DataFrame) -> dict[str, Any]:
+    configs = ["A", "B", "C", "D"]
+    baseline_config = "B"
+    if run_df.empty:
+        return {
+            "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+            "workloads": [],
+            "maxSpeedup": 0.0,
+            "minSpeedup": 0.0,
+        }
+
+    rows = run_df[["Workload", "Config", "WallTime"]].copy()
+    agg = (
+        rows.groupby(["Workload", "Config"], dropna=False, as_index=False)
+        .mean(numeric_only=True)
+        .sort_values(["Workload", "Config"])
+    )
+
+    workloads: list[dict[str, Any]] = []
+    speedup_values: list[float] = []
+    for workload in sorted(agg["Workload"].unique()):
+        workload_df = agg[agg["Workload"] == workload].copy()
+        baseline_rows = workload_df[workload_df["Config"] == baseline_config]
+        if baseline_rows.empty:
+            continue
+        baseline = float(baseline_rows["WallTime"].iloc[0])
+        bars = []
+        for cfg in configs:
+            cfg_rows = workload_df[workload_df["Config"] == cfg]
+            if cfg_rows.empty:
+                continue
+            wall = float(cfg_rows["WallTime"].iloc[0])
+            if wall <= 0 or baseline <= 0:
+                continue
+            speedup = baseline / wall
+            speedup_values.append(speedup)
+            bars.append(
+                {
+                    "config": cfg,
+                    "label": get_label(cfg),
+                    "speedup": round(speedup, 3),
+                    "wall_sec": round(wall, 6),
+                }
+            )
+        if bars:
+            workloads.append({"workload": workload, "baseline": round(baseline, 6), "bars": bars})
+
+    if not speedup_values:
+        min_speedup = 0.0
+        max_speedup = 0.0
+    else:
+        min_speedup = round(min(speedup_values), 3)
+        max_speedup = round(max(speedup_values), 3)
+
+    return {
+        "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+        "workloads": workloads,
+        "minSpeedup": min_speedup,
+        "maxSpeedup": max_speedup,
+        "baselineConfig": baseline_config,
+        "baselineLabel": get_label(baseline_config),
+    }
+
+
+def _build_memory_section(chart_data: dict[str, Any]) -> str:
+    payload_json = json.dumps(chart_data, ensure_ascii=True).replace("</", "<\\/")
+    legend_html = []
+    for item in chart_data.get("configs", []):
+        code = escape(str(item.get("code", "")))
+        label = escape(str(item.get("label", "")))
+        legend_html.append(
+            f'<span class="memory-config-pill"><strong>{code}</strong><span>{label}</span></span>'
+        )
+    legend_markup = "".join(legend_html)
+    return """
+<div class="card memory-card">
+  <h2>Memory Comparison</h2>
+  <p class="section-note">Peak RSS is averaged per workload and execution path, then rendered as a grouped D3 chart so memory differences stay readable across workloads without flattening small variations.</p>
+  <div class="memory-legend">
+    <span class="memory-legend-title">Execution configs</span>
+    <div class="memory-config-grid">__LEGEND__</div>
+  </div>
+  <div class="memory-chart-shell">
+    <script type="application/json" id="memory-comparison-data">__PAYLOAD__</script>
+    <div id="memory-comparison-chart" class="memory-chart-grid"></div>
+  </div>
+</div>
+<style>
+  .memory-card { border: 1px solid #dbe7ff; background: linear-gradient(180deg, rgba(255,255,255,0.98), #f8fafc); }
+  .memory-legend { border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; padding: 12px 14px; margin: 10px 0 16px; }
+  .memory-legend-title { display: block; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b; margin-bottom: 10px; }
+  .memory-config-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .memory-config-pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 999px; border: 1px solid #e2e8f0; background: #f8fafc; color: #334155; font-size: 12px; line-height: 1.1; }
+  .memory-config-pill strong { color: #0f172a; }
+  .memory-config-pill span { white-space: nowrap; }
+  .memory-chart-shell { margin-top: 6px; }
+  .memory-chart-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .memory-panel { border: 1px solid #e2e8f0; border-radius: 16px; background: linear-gradient(180deg, #fff, #f8fafc); padding: 14px 14px 12px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04); }
+  .memory-panel h3 { margin: 0; font-size: 16px; color: #0f172a; }
+  .memory-panel .subtitle { margin: 3px 0 10px; font-size: 12px; color: #64748b; }
+  .memory-svg { width: 100%; height: auto; display: block; }
+  .memory-axis text { fill: #475569; font-size: 11px; }
+  .memory-axis path, .memory-axis line { stroke: #cbd5e1; }
+  .memory-grid line { stroke: #e2e8f0; stroke-dasharray: 3 4; }
+  .memory-bar:hover .memory-hit { fill: rgba(15, 23, 42, 0.03); }
+  .memory-tooltip { position: fixed; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: rgba(15, 23, 42, 0.96); color: #f8fafc; border-radius: 12px; padding: 10px 12px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22); font-size: 12px; line-height: 1.45; max-width: 260px; }
+  .memory-tooltip strong { display: block; font-size: 13px; margin-bottom: 4px; color: #fff; }
+  .memory-tooltip .metric { display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; }
+  .memory-tooltip .metric span:first-child { color: #cbd5e1; }
+  .memory-empty { padding: 20px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #475569; background: #fff; }
+  .memory-bar-fill-a { fill: #9e9e9e; }
+  .memory-bar-fill-b { fill: #ff7043; }
+  .memory-bar-fill-c { fill: #42a5f5; }
+  .memory-bar-fill-d { fill: #26a69a; }
+  @media (max-width: 760px) {
+    .memory-legend { margin-bottom: 12px; }
+  }
+</style>
+<script>
+(function() {
+  const dataNode = document.getElementById("memory-comparison-data");
+  const chartNode = document.getElementById("memory-comparison-chart");
+  if (!dataNode || !chartNode || typeof d3 === "undefined") {
+    return;
+  }
+
+  const payload = JSON.parse(dataNode.textContent);
+  const tooltip = d3.select("body").selectAll(".memory-tooltip")
+    .data([null])
+    .join("div")
+    .attr("class", "memory-tooltip");
+  const palette = { A: "#9e9e9e", B: "#ff7043", C: "#42a5f5", D: "#26a69a" };
+
+  function formatMb(value) {
+    return `${value.toFixed(1)} MB`;
+  }
+
+  function hideTooltip() {
+    tooltip.style("opacity", 0);
+  }
+
+  function showTooltip(event, datum) {
+    tooltip
+      .style("opacity", 1)
+      .html(`
+        <strong>${datum.workload} · Config ${datum.config}</strong>
+        <div class="metric"><span>Execution path</span><span>${datum.label}</span></div>
+        <div class="metric"><span>Peak RSS</span><span>${formatMb(datum.peak_rss_mb)}</span></div>
+      `);
+
+    const pad = 18;
+    const rect = tooltip.node().getBoundingClientRect();
+    let left = event.clientX + 16;
+    let top = event.clientY + 16;
+    if (left + rect.width + pad > window.innerWidth) {
+      left = event.clientX - rect.width - 16;
+    }
+    if (top + rect.height + pad > window.innerHeight) {
+      top = event.clientY - rect.height - 16;
+    }
+    tooltip.style("left", `${Math.max(8, left)}px`).style("top", `${Math.max(8, top)}px`);
+  }
+
+  function render() {
+    chartNode.innerHTML = "";
+    if (!payload.workloads || payload.workloads.length === 0) {
+      chartNode.innerHTML = '<div class="memory-empty">No memory data was found for this run.</div>';
+      return;
+    }
+
+    const containerWidth = chartNode.getBoundingClientRect().width || chartNode.clientWidth || 960;
+    const minPanelWidth = 300;
+    const gap = 16;
+    const cols = Math.max(1, Math.min(3, Math.floor((containerWidth + gap) / minPanelWidth)));
+    chartNode.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+
+    const panelWidth = (containerWidth - gap * (cols - 1)) / cols;
+    const panelHeight = 286;
+    const margin = { top: 26, right: 14, bottom: 38, left: 52 };
+    const innerWidth = Math.max(180, panelWidth - margin.left - margin.right);
+    const innerHeight = panelHeight - margin.top - margin.bottom;
+    const maxPeak = Math.max(1, (payload.maxPeakRssMb || 0) * 1.2);
+    const yScale = d3.scaleLinear().domain([0, maxPeak]).nice().range([innerHeight, 0]);
+    const xScale = d3.scaleBand().domain(payload.configs.map((d) => d.code)).range([0, innerWidth]).padding(0.22);
+    const barWidth = xScale.bandwidth();
+    const svgWidth = innerWidth + margin.left + margin.right;
+
+    payload.workloads.forEach((workload) => {
+      const panel = chartNode.appendChild(document.createElement("div"));
+      panel.className = "memory-panel";
+      panel.innerHTML = `<h3>${workload.workload}</h3><div class="subtitle">Peak RSS by execution config</div>`;
+
+      const svg = d3.select(panel)
+        .append("svg")
+        .attr("class", "memory-svg")
+        .attr("viewBox", `0 0 ${svgWidth} ${panelHeight}`)
+        .attr("role", "img")
+        .attr("aria-label", `Memory comparison for workload ${workload.workload}`);
+
+      const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+      g.append("g")
+        .attr("class", "memory-grid")
+        .call(d3.axisLeft(yScale).ticks(4).tickSize(-innerWidth).tickFormat(""))
+        .selectAll("line")
+        .attr("stroke", "#e2e8f0");
+
+      g.append("g")
+        .attr("class", "memory-axis")
+        .call(d3.axisLeft(yScale).ticks(4).tickFormat((d) => `${d} MB`));
+
+      g.append("g")
+        .attr("class", "memory-axis")
+        .attr("transform", `translate(0,${innerHeight})`)
+        .call(d3.axisBottom(xScale).tickSizeOuter(0));
+
+      const barGroups = g.selectAll(".memory-bar")
+        .data(workload.bars)
+        .join("g")
+        .attr("class", "memory-bar")
+        .attr("transform", (d) => `translate(${xScale(d.config)},0)`);
+
+      barGroups.append("rect")
+        .attr("class", "memory-hit")
+        .attr("x", 0)
+        .attr("y", 0)
+        .attr("width", barWidth)
+        .attr("height", innerHeight)
+        .attr("fill", "transparent")
+        .on("pointerenter", function(event, d) {
+          d3.select(this.parentNode).select("rect.memory-fill").attr("opacity", 0.92);
+          showTooltip(event, d);
+        })
+        .on("pointermove", function(event, d) {
+          showTooltip(event, d);
+        })
+        .on("pointerleave", function() {
+          d3.select(this.parentNode).select("rect.memory-fill").attr("opacity", 1);
+          hideTooltip();
+        });
+
+      barGroups.append("rect")
+        .attr("class", (d) => `memory-fill memory-bar-fill-${d.config.toLowerCase()}`)
+        .attr("x", 0)
+        .attr("y", (d) => yScale(d.peak_rss_mb))
+        .attr("width", barWidth)
+        .attr("height", (d) => Math.max(0, innerHeight - yScale(d.peak_rss_mb)));
+
+      barGroups.append("text")
+        .attr("x", barWidth / 2)
+        .attr("y", (d) => Math.max(12, yScale(d.peak_rss_mb) - 8))
+        .attr("text-anchor", "middle")
+        .attr("fill", "#64748b")
+        .attr("font-size", 11)
+        .attr("font-weight", 700)
+        .text((d) => formatMb(d.peak_rss_mb));
+    });
+  }
+
+  render();
+  if ("ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => {
+      window.requestAnimationFrame(render);
+    });
+    observer.observe(chartNode);
+  } else {
+    window.addEventListener("resize", render);
+  }
+})();
+</script>
+""".replace("__PAYLOAD__", payload_json).replace("__LEGEND__", legend_markup)
+
+
+def _build_speedup_section(chart_data: dict[str, Any]) -> str:
+    payload_json = json.dumps(chart_data, ensure_ascii=True).replace("</", "<\\/")
+    legend_html = []
+    for item in chart_data.get("configs", []):
+        code = escape(str(item.get("code", "")))
+        label = escape(str(item.get("label", "")))
+        legend_html.append(
+            f'<span class="speedup-config-pill"><strong>{code}</strong><span>{label}</span></span>'
+        )
+    legend_markup = "".join(legend_html)
+    baseline_code = escape(str(chart_data.get("baselineConfig", "B")))
+    baseline_label = escape(str(chart_data.get("baselineLabel", "Spark (Pandas/Arrow)")))
+    return """
+<div class="card speedup-card">
+  <h2>Relative Speedups</h2>
+  <p class="section-note">Speedup is computed against Spark's batched path (Config __BASELINE_CODE__, __BASELINE_LABEL__) for each workload and rendered on a log scale so both small regressions and large wins remain visible.</p>
+  <div class="speedup-legend">
+    <div class="speedup-legend-row">
+      <span class="speedup-legend-title">Execution configs</span>
+      <div class="speedup-config-grid">__LEGEND__</div>
+    </div>
+    <div class="speedup-legend-row">
+      <span class="speedup-legend-title">Reference</span>
+      <span class="speedup-baseline-pill"><span class="speedup-baseline-line"></span>1.0x baseline (Config __BASELINE_CODE__)</span>
+    </div>
+  </div>
+  <div class="speedup-chart-shell">
+    <script type="application/json" id="relative-speedups-data">__PAYLOAD__</script>
+    <div id="relative-speedups-chart" class="speedup-chart-grid"></div>
+  </div>
+</div>
+<style>
+  .speedup-card { border: 1px solid #dbe7ff; background: linear-gradient(180deg, rgba(255,255,255,0.98), #f8fafc); }
+  .speedup-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 10px 0 16px; }
+  .speedup-legend-row { border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; padding: 12px 14px; }
+  .speedup-legend-title { display: block; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b; margin-bottom: 10px; }
+  .speedup-config-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .speedup-config-pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 999px; border: 1px solid #e2e8f0; background: #f8fafc; color: #334155; font-size: 12px; line-height: 1.1; }
+  .speedup-config-pill strong { color: #0f172a; }
+  .speedup-config-pill span { white-space: nowrap; }
+  .speedup-baseline-pill { display: inline-flex; align-items: center; padding: 7px 10px; border-radius: 999px; background: #eef2ff; color: #1e3a8a; border: 1px solid #c7d2fe; font-size: 12px; font-weight: 700; }
+  .speedup-baseline-line { width: 18px; height: 0; border-top: 2px dashed #dc2626; margin-right: 8px; flex: 0 0 auto; }
+  .speedup-chart-shell { margin-top: 6px; }
+  .speedup-chart-grid { display: block; }
+  .speedup-panel { border: 1px solid #e2e8f0; border-radius: 16px; background: linear-gradient(180deg, #fff, #f8fafc); padding: 14px 14px 12px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04); }
+  .speedup-panel h3 { margin: 0; font-size: 16px; color: #0f172a; }
+  .speedup-panel .subtitle { margin: 3px 0 10px; font-size: 12px; color: #64748b; }
+  .speedup-svg { width: 100%; height: auto; display: block; }
+  .speedup-axis text { fill: #475569; font-size: 11px; }
+  .speedup-axis path, .speedup-axis line { stroke: #cbd5e1; }
+  .speedup-grid line { stroke: #e2e8f0; stroke-dasharray: 3 4; }
+  .speedup-bar:hover .speedup-hit { fill: rgba(15, 23, 42, 0.03); }
+  .speedup-tooltip { position: fixed; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: rgba(15, 23, 42, 0.96); color: #f8fafc; border-radius: 12px; padding: 10px 12px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22); font-size: 12px; line-height: 1.45; max-width: 260px; }
+  .speedup-tooltip strong { display: block; font-size: 13px; margin-bottom: 4px; color: #fff; }
+  .speedup-tooltip .metric { display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; }
+  .speedup-tooltip .metric span:first-child { color: #cbd5e1; }
+  .speedup-empty { padding: 20px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #475569; background: #fff; }
+  .speedup-bar-fill-b { fill: #ff7043; }
+  .speedup-bar-fill-c { fill: #42a5f5; }
+  .speedup-bar-fill-d { fill: #26a69a; }
+  .speedup-reference-line { stroke: #dc2626; stroke-dasharray: 5 4; stroke-width: 1.5; }
+  .speedup-reference-label { fill: #dc2626; font-size: 11px; font-weight: 700; }
+  @media (max-width: 760px) {
+    .speedup-legend { grid-template-columns: 1fr; }
+  }
+</style>
+<script>
+(function() {
+  const dataNode = document.getElementById("relative-speedups-data");
+  const chartNode = document.getElementById("relative-speedups-chart");
+  if (!dataNode || !chartNode || typeof d3 === "undefined") {
+    return;
+  }
+
+  const payload = JSON.parse(dataNode.textContent);
+  const tooltip = d3.select("body").selectAll(".speedup-tooltip")
+    .data([null])
+    .join("div")
+    .attr("class", "speedup-tooltip");
+  const palette = { B: "#ff7043", C: "#42a5f5", D: "#26a69a" };
+
+  function formatSpeedup(value) {
+    return `${value.toFixed(2)}x`;
+  }
+
+  function hideTooltip() {
+    tooltip.style("opacity", 0);
+  }
+
+  function showTooltip(event, datum) {
+    tooltip
+      .style("opacity", 1)
+      .html(`
+        <strong>${datum.workload} · Config ${datum.config}</strong>
+        <div class="metric"><span>Speedup</span><span>${formatSpeedup(datum.speedup)}</span></div>
+        <div class="metric"><span>Wall time</span><span>${datum.wall_sec.toFixed(3)}s</span></div>
+      `);
+
+    const pad = 18;
+    const rect = tooltip.node().getBoundingClientRect();
+    let left = event.clientX + 16;
+    let top = event.clientY + 16;
+    if (left + rect.width + pad > window.innerWidth) {
+      left = event.clientX - rect.width - 16;
+    }
+    if (top + rect.height + pad > window.innerHeight) {
+      top = event.clientY - rect.height - 16;
+    }
+    tooltip.style("left", `${Math.max(8, left)}px`).style("top", `${Math.max(8, top)}px`);
+  }
+
+  function render() {
+    chartNode.innerHTML = "";
+    if (!payload.workloads || payload.workloads.length === 0) {
+      chartNode.innerHTML = '<div class="speedup-empty">No speedup data was found for this run.</div>';
+      return;
+    }
+
+    const width = chartNode.getBoundingClientRect().width || chartNode.clientWidth || 960;
+    const margin = { top: 60, right: 12, bottom: 72, left: 52 };
+    const height = 420;
+    const innerWidth = Math.max(200, width - margin.left - margin.right);
+    const innerHeight = height - margin.top - margin.bottom;
+    const workloads = payload.workloads.map((d) => d.workload);
+    const configs = payload.configs.map((d) => d.code);
+    const bars = payload.workloads.flatMap((d) => d.bars.map((bar) => ({ ...bar, workload: d.workload })));
+    const minSpeedup = Math.max(0.5, Math.min(payload.minSpeedup || 0.5, 0.8) * 0.85);
+    const maxSpeedup = Math.max(1.2, (payload.maxSpeedup || 1.2) * 1.4);
+    const xScale = d3.scaleBand().domain(workloads).range([0, innerWidth]).padding(0.24);
+    const barGap = 8;
+    const barWidth = Math.min(40, Math.max(14, (xScale.bandwidth() - barGap * (configs.length - 1)) / configs.length));
+    const barPitch = barWidth + barGap;
+    const yScale = d3.scaleLog().domain([minSpeedup, maxSpeedup]).range([innerHeight, 0]).nice();
+    const svgWidth = innerWidth + margin.left + margin.right;
+
+    const panel = chartNode.appendChild(document.createElement("div"));
+    panel.className = "speedup-panel";
+    panel.innerHTML = '<h3>Relative Speedups</h3><div class="subtitle">Speedup vs Spark batched baseline, log scale</div>';
+
+    const svg = d3.select(panel)
+      .append("svg")
+      .attr("class", "speedup-svg")
+      .attr("viewBox", `0 0 ${svgWidth} ${height}`)
+      .attr("role", "img")
+      .attr("aria-label", "Relative speedups across workloads");
+
+    const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+    let yTicks = [0.5, 1, 2, 4, 8, 16].filter((tick) => tick >= minSpeedup && tick <= maxSpeedup);
+    if (yTicks.length < 3) {
+      yTicks = [0.5, 1, 2].filter((tick) => tick >= minSpeedup && tick <= maxSpeedup);
+    }
+
+    g.append("g")
+      .attr("class", "speedup-grid")
+      .call(d3.axisLeft(yScale).tickValues(yTicks).tickSize(-innerWidth).tickFormat(""))
+      .selectAll("line")
+      .attr("stroke", "#e2e8f0");
+
+    g.append("g")
+      .attr("class", "speedup-axis")
+      .call(d3.axisLeft(yScale).tickValues(yTicks).tickFormat((d) => `${d}x`));
+
+    g.append("line")
+      .attr("class", "speedup-reference-line")
+      .attr("x1", 0)
+      .attr("x2", innerWidth)
+      .attr("y1", yScale(1))
+      .attr("y2", yScale(1));
+
+    const barGroups = g.selectAll(".speedup-bar")
+      .data(bars)
+      .join("g")
+      .attr("class", "speedup-bar")
+      .attr("transform", (d) => `translate(${xScale(d.workload) + configs.indexOf(d.config) * barPitch},0)`);
+
+    barGroups.append("rect")
+      .attr("class", "speedup-hit")
+      .attr("x", 0)
+      .attr("y", (d) => Math.min(yScale(d.speedup), innerHeight - 4))
+      .attr("width", barWidth)
+      .attr("height", (d) => Math.max(4, innerHeight - Math.min(yScale(d.speedup), innerHeight - 4)))
+      .attr("fill", "transparent")
+      .on("pointerenter", function(event, d) {
+        d3.select(this.parentNode).select("rect.speedup-fill").attr("opacity", 0.92);
+        showTooltip(event, d);
+      })
+      .on("pointermove", function(event, d) {
+        showTooltip(event, d);
+      })
+      .on("pointerleave", function() {
+        d3.select(this.parentNode).select("rect.speedup-fill").attr("opacity", 1);
+        hideTooltip();
+      });
+
+    barGroups.append("rect")
+      .attr("class", (d) => `speedup-fill speedup-bar-fill-${d.config.toLowerCase()}`)
+      .attr("x", 0)
+      .attr("y", (d) => yScale(d.speedup))
+      .attr("width", barWidth)
+      .attr("height", (d) => Math.max(0, innerHeight - yScale(d.speedup)))
+      .style("pointer-events", "none");
+
+    barGroups.append("text")
+      .attr("x", barWidth / 2)
+      .attr("y", (d) => Math.max(12, yScale(d.speedup) - 8))
+      .attr("text-anchor", "middle")
+      .attr("fill", "#64748b")
+      .attr("font-size", 11)
+      .attr("font-weight", 700)
+      .text((d) => formatSpeedup(d.speedup));
+
+    g.selectAll(".speedup-config-label")
+      .data(bars)
+      .join("text")
+      .attr("class", "speedup-config-label")
+      .attr("x", (d) => xScale(d.workload) + configs.indexOf(d.config) * barPitch + barWidth / 2)
+      .attr("y", innerHeight + 18)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#475569")
+      .attr("font-size", 11)
+      .attr("font-weight", 700)
+      .text((d) => d.config);
+
+    g.selectAll(".speedup-workload-label")
+      .data(workloads)
+      .join("text")
+      .attr("class", "speedup-workload-label")
+      .attr("x", (d) => xScale(d) + xScale.bandwidth() / 2)
+      .attr("y", -14)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#0f172a")
+      .attr("font-size", 12)
+      .attr("font-weight", 800)
+      .text((d) => d);
+
+  }
+
+  render();
+  if ("ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => {
+      window.requestAnimationFrame(render);
+    });
+    observer.observe(chartNode);
+  } else {
+    window.addEventListener("resize", render);
+  }
+})();
+</script>
+""".replace("__PAYLOAD__", payload_json).replace("__LEGEND__", legend_markup).replace("__BASELINE_CODE__", baseline_code).replace("__BASELINE_LABEL__", baseline_label)
+
+
+def _write_html(results_dir: Path, summary_df: pd.DataFrame, run_df: pd.DataFrame) -> None:
     rows = summary_df.copy()
     rows["DepthDisplay"] = rows["Depth"].apply(lambda x: int(x) if pd.notna(x) else "-")
     rows["LogoSVG"] = rows["Config"].map(_logo_svg)
     rows["RowClass"] = rows["Config"].map(_row_class)
     rows["SpeedupClass"] = rows.apply(lambda row: _speedup_class(row["Config"], row["Speedup_x"]), axis=1)
     tel_cards, tel_maxes = _build_tel_cards(rows)
+    overhead_breakdown_section = _build_overhead_breakdown_section(
+        _build_overhead_breakdown_payload(run_df)
+    )
+    memory_section = _build_memory_section(_build_memory_payload(run_df))
+    speedup_section = _build_speedup_section(_build_speedup_payload(run_df))
     context = _load_report_context(results_dir)
 
     template = Template(
@@ -659,6 +1667,16 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
     .spec-item { border-bottom: 1px dashed #e5e7eb; padding-bottom: 8px; }
     .spec-item .k { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
     .spec-item .v { display: block; font-size: 15px; font-weight: 600; color: #0f172a; margin-top: 2px; }
+    .knob-shell { background: linear-gradient(180deg, #fff, #f8fafc); border: 1px solid #e2e8f0; border-radius: 18px; padding: 18px; box-shadow: 0 4px 20px rgba(15, 23, 42, 0.04); }
+    .knob-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
+    .knob-card { background: linear-gradient(180deg, #ffffff, #f8fafc); border: 1px solid #e2e8f0; border-radius: 16px; padding: 16px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04); }
+    .knob-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+    .knob-card-head strong { font-size: 15px; color: #0f172a; }
+    .knob-code { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; background: #e0f2fe; color: #075985; font-size: 11px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
+    .knob-specs { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .knob-spec { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: 12px; background: #ffffff; border: 1px solid #e5e7eb; }
+    .knob-spec .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
+    .knob-spec .v { font-size: 13px; font-weight: 700; color: #0f172a; text-align: right; }
     .diagram-list { display: grid; grid-template-columns: 1fr; gap: 14px; }
     .diagram-card { padding: 28px 24px; border: 1px solid #e5e7eb; border-radius: 18px; background: linear-gradient(180deg, #fff, #f8fafc); margin-top: 12px; overflow-x: auto; }
     .diagram-card .mermaid { display: block; }
@@ -697,15 +1715,6 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
       <div class="hero-chip"><span class="k">Profile</span><span class="v">{{ run_specs[0][1] if run_specs else "-" }}</span></div>
       <div class="hero-chip"><span class="k">Dataset Rows</span><span class="v">{{ run_specs[8][1] if run_specs else "-" }}</span></div>
     </div>
-    <div class="hero-configs">
-      {% for item in configs %}
-      <div class="mini-card config-card {{ item.row_class }}">
-        <div class="config-head">{{ item.logo | safe }}<strong>{{ item.code }}</strong></div>
-        <div><strong>{{ item.label }}</strong></div>
-        <p>{{ item.description }}</p>
-      </div>
-      {% endfor %}
-    </div>
   </div>
   <div class="grid-2">
     <div class="card">
@@ -723,7 +1732,7 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
     <div class="diagram-list">
       {% for item in workloads %}
       <div class="mini-card">
-        <h3>{{ item.code }}</h3>
+        <div class="config-head"><strong>{{ item.label }}</strong><span class="knob-code">{{ item.code }}</span></div>
         <p>{{ item.description }}</p>
         <div class="diagram-card">
           {{ item.svg | safe }}
@@ -733,8 +1742,8 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
     </div>
   </div>
   <div class="card">
-    <h2>Execution Configs</h2>
-    <p class="section-note">Each configuration represents a distinct data transport strategy between the execution engine and the Python model runtime. Workload logic is held constant; what varies is boundary-crossing frequency, serialization format, and the proportion of the pipeline that remains inside the engine.</p>
+    <h2>Configurations</h2>
+    <p class="section-note">Each configuration represents a distinct data transport strategy between the execution engine and the Python model runtime. Workload logic is held constant; what varies is boundary-crossing frequency, serialization format, and the degree to which data movement remains inside the engine.</p>
     <div class="diagram-list">
       {% for item in configs %}
       <div class="mini-card config-card {{ item.row_class }}">
@@ -749,8 +1758,53 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
     </div>
   </div>
   <div class="card">
+    <h2>Run Configuration</h2>
+    <p class="section-note">Hardware, software, and model configuration for this benchmark run. Workload knobs are included here because they define the exact workload shape used for the measurements.</p>
+    <div class="grid-2">
+      <div class="mini-card">
+        <h3>Environment</h3>
+        <div class="spec-grid">
+          {% for key, value in run_specs %}
+          <div class="spec-item">
+            <span class="k">{{ key }}</span>
+            <span class="v">{{ value }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="mini-card">
+        <h3>Models</h3>
+        {% for item in model_specs %}
+        <div class="spec-item">
+          <span class="k">{{ item.role }}</span>
+          <span class="v">{{ item.name }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <h3 style="margin-top:18px;">Workload Knobs</h3>
+    <div class="knob-grid">
+      {% for item in workload_knobs %}
+      <div class="knob-card">
+        <div class="knob-card-head">
+          <strong>{{ item.name }}</strong>
+          <span class="knob-code">{{ item.badge }}</span>
+        </div>
+        <div class="knob-specs">
+          {% for param in item.params %}
+          <div class="knob-spec">
+            <span class="k">{{ param.key }}</span>
+            <span class="v">{{ param.value }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="card">
     <h2>Performance Summary</h2>
-    <p class="section-note">Cold reflects first-run latency including JIT compilation, model loading, and executor initialization. Warm is the steady-state runtime across subsequent iterations; — indicates a single sample was collected. Speedup is normalized to Config A at the same workload and recursion depth.</p>
+    <p class="section-note">Cold reflects first-run latency including JIT compilation, model loading, and executor initialization. Warm is the steady-state runtime across subsequent iterations; — indicates a single sample was collected. Speedup is normalized to Spark's batched path (Config B) at the same workload and recursion depth.</p>
     <table>
       <thead>
         <tr>
@@ -842,6 +1896,9 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
       {% endfor %}
     </div>
   </div>
+  {{ overhead_breakdown_section | safe }}
+  {{ memory_section | safe }}
+  {{ speedup_section | safe }}
   {% for plot in plots %}
   <div class="card">
     <h2>{{ plot.title }}</h2>
@@ -851,43 +1908,6 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
     </div>
   </div>
   {% endfor %}
-  <div class="card">
-    <h2>Run Configuration</h2>
-    <p class="section-note">Hardware, software, and model configuration for this benchmark run.</p>
-    <div class="grid-2">
-      <div class="mini-card">
-        <h3>Environment</h3>
-        <div class="spec-grid">
-          {% for key, value in run_specs %}
-          <div class="spec-item">
-            <span class="k">{{ key }}</span>
-            <span class="v">{{ value }}</span>
-          </div>
-          {% endfor %}
-        </div>
-      </div>
-      <div class="mini-card">
-        <h3>Models</h3>
-        {% for item in model_specs %}
-        <div class="spec-item">
-          <span class="k">{{ item.role }}</span>
-          <span class="v">{{ item.name }}</span>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-    <div class="card" style="margin-top:16px; margin-bottom:0; box-shadow:none;">
-      <h3>Workload Knobs</h3>
-      <div class="grid-4">
-        {% for item in workload_knobs %}
-        <div class="mini-card">
-          <strong>{{ item.name }}</strong>
-          <p><code>{{ item.json }}</code></p>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-  </div>
 </body>
 </html>
         """
@@ -895,29 +1915,14 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
 
     plots = [
         {
-            "title": "Overhead Breakdown",
-            "filename": "overhead_breakdown.png",
-            "blurb": "Partitions wall-clock time into traced inference compute, traced data transfer, and unattributed framework overhead. Identifies whether runtime differences are driven by model throughput or boundary-crossing cost.",
-        },
-        {
             "title": "GPU Timeline",
             "filename": "gpu_timeline.png",
             "blurb": "GPU utilization over time, per configuration. Gaps between compute bursts indicate scheduling or data-transfer stalls that limit accelerator efficiency.",
         },
         {
-            "title": "Memory Comparison",
-            "filename": "memory.png",
-            "blurb": "Peak and average RSS across configurations. Elevated memory relative to Config C or D indicates data duplication or buffering at the serialization boundary.",
-        },
-        {
             "title": "Depth Runtime",
             "filename": "depth_runtime.png",
             "blurb": "Depth = number of sequential UDF pipeline stages, where each stage does a trivially cheap computation. W0 runtime as a function of chain depth. Slope quantifies the per-crossing overhead tax that accumulates with each additional engine–Python round trip.",
-        },
-        {
-            "title": "Relative Speedups",
-            "filename": "relative_speedups.png",
-            "blurb": "Speedup of each configuration relative to Config A, per workload. Exposes whether gains are consistent across workload shapes or specific to particular access patterns.",
         },
         {
             "title": "Disk IO",
@@ -932,7 +1937,16 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame) -> None:
     ]
 
     (results_dir / "aggregate.html").write_text(
-        template.render(rows=rows, plots=plots, tel_cards=tel_cards, tel_maxes=tel_maxes, **context)
+        template.render(
+            rows=rows,
+            plots=plots,
+            tel_cards=tel_cards,
+            tel_maxes=tel_maxes,
+            overhead_breakdown_section=overhead_breakdown_section,
+            memory_section=memory_section,
+            speedup_section=speedup_section,
+            **context,
+        )
     )
 
 
@@ -966,7 +1980,7 @@ def aggregate(results_dir: str) -> pd.DataFrame:
     _write_csvs(path, run_df, summary_df)
     _write_markdown(path, summary_df)
     _run_plot_scripts(path)
-    _write_html(path, summary_df)
+    _write_html(path, summary_df, run_df)
     print(f"Wrote aggregate outputs under {path}")
     return summary_df
 

@@ -102,3 +102,15 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert (results_dir / "aggregate_summary.json").exists()
     assert (results_dir / "aggregate.md").exists()
     assert (results_dir / "aggregate.html").exists()
+
+    html = (results_dir / "aggregate.html").read_text()
+    assert 'id="overhead-breakdown-chart"' in html
+    assert 'id="overhead-breakdown-data"' in html
+    assert 'id="memory-comparison-chart"' in html
+    assert 'id="memory-comparison-data"' in html
+    assert 'id="relative-speedups-chart"' in html
+    assert 'id="relative-speedups-data"' in html
+    assert "Overhead Breakdown" in html
+    assert "Memory Comparison" in html
+    assert "Relative Speedups" in html
+    assert "Spark's batched path" in html
