@@ -39,6 +39,7 @@ import json
 import threading
 import time
 from collections import defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -264,3 +265,9 @@ class BoundaryTimer:
         print(f"  Serialization tax : {r['serialization_tax_pct']:.2f}%")
         print(f"  Compute           : {r['compute_pct']:.2f}%")
         print()
+
+
+def optional_measure(timer: BoundaryTimer | None, phase: str):
+    if timer is None:
+        return nullcontext()
+    return timer.measure(phase)

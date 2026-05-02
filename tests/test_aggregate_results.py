@@ -23,9 +23,9 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
         trace_path,
         {
             "traceEvents": [
-                {"name": "UDF_BATCH_EXECUTION", "dur": 2_000_000},
-                {"name": "DATA_TRANSFER_IN", "dur": 500_000},
-                {"name": "INFERENCE", "dur": 250_000},
+                {"name": "UDF_BATCH_EXECUTION", "ts": 10_600_000, "dur": 2_000_000},
+                {"name": "DATA_TRANSFER_IN", "ts": 10_100_000, "dur": 500_000},
+                {"name": "INFERENCE", "ts": 12_700_000, "dur": 250_000},
             ]
         },
     )
@@ -50,6 +50,8 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
             "mb_written_delta": 4.0,
             "write_throughput_mb_s": 1.0,
             "output_rows": 100,
+            "run_start_wall_ts": 10.0,
+            "run_end_wall_ts": 14.0,
             "samples": [
                 {"t_sec": 0.0, "cpu_pct": 10.0, "rss_mb": 290.0, "host_ram_pct": 50.0},
                 {"t_sec": 0.5, "cpu_pct": 15.0, "rss_mb": 300.0, "host_ram_pct": 55.0},
@@ -96,6 +98,15 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert row["Peak RSS (MB)"] == 321.0
     assert row["Disk Write (MB)"] == 4.0
     assert row["Trace Events"] == 3
+    run_df = aggregate_results._build_run_df(results_dir)
+    run_row = run_df.iloc[0]
+    assert run_row["PreTrace_sec"] == 0.1
+    assert run_row["TraceWindow_sec"] == 2.85
+    assert run_row["UntracedInWindow_sec"] == 0.1
+    assert run_row["PostTrace_sec"] == 1.05
+    assert run_row["InferenceTime_sec"] == 0.25
+    assert run_row["UntracedEngineRuntime_sec"] == 0.25
+    assert run_row["BoundaryTax_sec"] == 3.5
 
     report_dir = results_dir / "report"
     assert (report_dir / "aggregate_runs.csv").exists()
@@ -116,8 +127,19 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert "Relative Speedups" in html
     assert "Spark's batched path" in html
     assert "Serialization vs Compute" not in html
-    assert ".overhead-untimed { background: #e25a1c; }" in html
-    assert 'untimed: "#e25a1c"' in html
+    assert "Direct conversion / transfer" in html
+    assert "Derived boundary tax" in html
+    assert "full boundary tax is broader than the direct conversion bar alone" in html
+    assert "Small traced compute in mock-model CPU runs means little compute was performed" in html
+    assert "Startup / dispatch" in html
+    assert "Untraced active runtime" in html
+    assert "Tail / materialization" in html
+    assert ".overhead-startup { background: #7ea6d8; }" in html
+    assert ".overhead-gap { background: #d38c6a; }" in html
+    assert ".overhead-tail { background: #a993cf; }" in html
+    assert 'startup: "#7ea6d8"' in html
+    assert 'activeGap: "#d38c6a"' in html
+    assert 'tail: "#a993cf"' in html
 
 
 def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -> None:
@@ -153,3 +175,32 @@ def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -
 
     assert len(summary) == 1
     assert (results_dir / "report" / "aggregate.html").exists()
+
+
+def test_summarize_trace_splits_detailed_phases_and_window(tmp_path: Path) -> None:
+    trace_path = tmp_path / "trace.json"
+    _write_json(
+        trace_path,
+        {
+            "traceEvents": [
+                {"name": "DATA_TRANSFER_IN", "ts": 1_000_000, "dur": 200_000},
+                {"name": "UDF_BATCH_EXECUTION", "ts": 1_250_000, "dur": 900_000},
+                {"name": "MODEL_LOAD", "ts": 1_300_000, "dur": 100_000},
+                {"name": "TOKENIZE", "ts": 1_420_000, "dur": 80_000},
+                {"name": "INFERENCE", "ts": 1_520_000, "dur": 200_000},
+                {"name": "DETOKENIZE", "ts": 1_760_000, "dur": 50_000},
+                {"name": "OTHER", "ts": 1_900_000, "dur": 40_000},
+            ]
+        },
+    )
+    summary = aggregate_results._summarize_trace(trace_path)
+    assert summary.transfer_time_sec == 0.2
+    assert summary.udf_time_sec == 0.9
+    assert summary.model_load_time_sec == 0.1
+    assert summary.tokenize_time_sec == 0.08
+    assert summary.inference_time_sec == 0.2
+    assert summary.detokenize_time_sec == 0.05
+    assert summary.other_time_sec == 0.04
+    assert summary.compute_time_sec == 0.47
+    assert summary.trace_window_sec == 1.15
+    assert summary.untraced_in_window_sec == 0.0

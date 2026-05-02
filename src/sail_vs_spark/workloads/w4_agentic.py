@@ -43,6 +43,7 @@ class W4Agentic(Workload):
         reward_threshold: float = 0.5,
         n_candidates: int = 2,
     ) -> None:
+        super().__init__()
         if max_iterations < 1:
             raise ValueError(f"max_iterations must be >= 1, got {max_iterations}")
         if n_candidates < 1:
@@ -54,16 +55,17 @@ class W4Agentic(Workload):
         self._sc = None
         self._cfg: dict = {}
 
-    def init(self, cfg: dict) -> None:
+    def init(self, cfg: dict, timer=None) -> None:
         from ..models.loaders import get_generator, get_scorer
+        self.bind_timer(timer)
         self._cfg = cfg
         mcfg_gen = dict(cfg.get("models", {}).get("generator", {}))
         mcfg_sc = dict(cfg.get("models", {}).get("scorer", {}))
         device = cfg.get("hardware", {}).get("device", "auto")
         mcfg_gen.setdefault("device", device)
         mcfg_sc.setdefault("device", device)
-        self._gen = get_generator(mcfg_gen)
-        self._sc = get_scorer(mcfg_sc)
+        self._gen = get_generator(mcfg_gen, timer=self._timer)
+        self._sc = get_scorer(mcfg_sc, timer=self._timer)
 
     def _ensure_init(self) -> None:
         if self._gen is None or self._sc is None:

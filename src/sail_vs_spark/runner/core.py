@@ -83,6 +83,7 @@ def execute_run(
         nvidia_dmon_path=artifacts.nvidia_dmon_log,
     )
     collector.start()
+    wall_start_ts = time.time()
     t0 = time.perf_counter()
     try:
         n_rows = run_workload(
@@ -95,6 +96,7 @@ def execute_run(
         )
     finally:
         wall = time.perf_counter() - t0
+        wall_end_ts = time.time()
         collector.stop()
         collector.save(
             artifacts.stats_json,
@@ -104,6 +106,8 @@ def execute_run(
                 "setup_description": get_setup_description(execution),
                 "depth": depth,
                 "wall_clock_sec": round(wall, 3),
+                "run_start_wall_ts": wall_start_ts,
+                "run_end_wall_ts": wall_end_ts,
                 "output_rows": int(n_rows) if isinstance(n_rows, int) else None,
             },
         )

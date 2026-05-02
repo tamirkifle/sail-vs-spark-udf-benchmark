@@ -45,9 +45,9 @@ def write_output(df: Any, output_parquet: str | None) -> int:
     return df.count()
 
 
-def build_initialized_workload(workload: str, cfg: dict[str, Any]):
+def build_initialized_workload(workload: str, cfg: dict[str, Any], timer: Any | None = None):
     wl = build_workload(workload, cfg)
-    wl.init(cfg)
+    wl.init(cfg, timer=timer)
     return wl
 
 

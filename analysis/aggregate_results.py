@@ -69,6 +69,7 @@ TRACE_PHASES_OF_INTEREST = {
     "UDF_ROW_EXECUTION",
     "DATA_TRANSFER_IN",
     "DATA_TRANSFER_OUT",
+    "MODEL_LOAD",
     "INFERENCE",
     "SCORE",
     "EMBED",
@@ -76,6 +77,19 @@ TRACE_PHASES_OF_INTEREST = {
     "TOKENIZE",
     "DETOKENIZE",
     "TRIVIAL_COMPUTE",
+    "OTHER",
+}
+
+TRACE_COMPUTE_PHASES = {
+    "MODEL_LOAD",
+    "INFERENCE",
+    "SCORE",
+    "EMBED",
+    "SIMILARITY",
+    "TOKENIZE",
+    "DETOKENIZE",
+    "TRIVIAL_COMPUTE",
+    "OTHER",
 }
 
 PLOT_SCRIPTS = [
@@ -110,7 +124,20 @@ class TraceSummary:
     udf_time_sec: float
     transfer_time_sec: float
     compute_time_sec: float
+    model_load_time_sec: float
+    tokenize_time_sec: float
+    inference_time_sec: float
+    detokenize_time_sec: float
+    score_time_sec: float
+    embed_time_sec: float
+    similarity_time_sec: float
+    trivial_compute_time_sec: float
+    other_time_sec: float
     trace_event_count: int
+    trace_start_ts: float | None
+    trace_end_ts: float | None
+    trace_window_sec: float
+    untraced_in_window_sec: float
 
 
 def get_label(cfg: str) -> str:
@@ -151,23 +178,36 @@ def _resolve_artifact_path(
 
 def _summarize_trace(trace_path: Path | None) -> TraceSummary:
     if trace_path is None or not trace_path.exists():
-        return TraceSummary(0.0, 0.0, 0.0, 0)
+        return TraceSummary(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, None, None, 0.0, 0.0
+        )
 
     try:
         trace_data = _read_json(trace_path)
     except Exception:
-        return TraceSummary(0.0, 0.0, 0.0, 0)
+        return TraceSummary(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, None, None, 0.0, 0.0
+        )
 
     udf_time_sec = 0.0
     transfer_time_sec = 0.0
     compute_time_sec = 0.0
+    phase_totals = {phase: 0.0 for phase in TRACE_COMPUTE_PHASES}
     trace_event_count = 0
+    trace_start_ts: float | None = None
+    trace_end_ts: float | None = None
 
     for event in trace_data.get("traceEvents", []):
         phase = event.get("name")
         if phase not in TRACE_PHASES_OF_INTEREST:
             continue
         dur_sec = float(event.get("dur", 0.0)) / 1_000_000.0
+        ts_raw = event.get("ts")
+        if ts_raw is not None:
+            start_ts = float(ts_raw)
+            end_ts = start_ts + float(event.get("dur", 0.0))
+            trace_start_ts = start_ts if trace_start_ts is None else min(trace_start_ts, start_ts)
+            trace_end_ts = end_ts if trace_end_ts is None else max(trace_end_ts, end_ts)
         trace_event_count += 1
         if phase in {"UDF_BATCH_EXECUTION", "UDF_ROW_EXECUTION"}:
             udf_time_sec += dur_sec
@@ -175,12 +215,32 @@ def _summarize_trace(trace_path: Path | None) -> TraceSummary:
             transfer_time_sec += dur_sec
         else:
             compute_time_sec += dur_sec
+            phase_totals[phase] += dur_sec
+
+    trace_window_sec = 0.0
+    if trace_start_ts is not None and trace_end_ts is not None:
+        trace_window_sec = max(0.0, (trace_end_ts - trace_start_ts) / 1_000_000.0)
+    traced_sum_sec = udf_time_sec + transfer_time_sec + compute_time_sec
+    untraced_in_window_sec = max(0.0, trace_window_sec - traced_sum_sec)
 
     return TraceSummary(
         udf_time_sec=round(udf_time_sec, 6),
         transfer_time_sec=round(transfer_time_sec, 6),
         compute_time_sec=round(compute_time_sec, 6),
+        model_load_time_sec=round(phase_totals["MODEL_LOAD"], 6),
+        tokenize_time_sec=round(phase_totals["TOKENIZE"], 6),
+        inference_time_sec=round(phase_totals["INFERENCE"], 6),
+        detokenize_time_sec=round(phase_totals["DETOKENIZE"], 6),
+        score_time_sec=round(phase_totals["SCORE"], 6),
+        embed_time_sec=round(phase_totals["EMBED"], 6),
+        similarity_time_sec=round(phase_totals["SIMILARITY"], 6),
+        trivial_compute_time_sec=round(phase_totals["TRIVIAL_COMPUTE"], 6),
+        other_time_sec=round(phase_totals["OTHER"], 6),
         trace_event_count=trace_event_count,
+        trace_start_ts=trace_start_ts,
+        trace_end_ts=trace_end_ts,
+        trace_window_sec=round(trace_window_sec, 6),
+        untraced_in_window_sec=round(untraced_in_window_sec, 6),
     )
 
 
@@ -220,6 +280,31 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
         )
 
     wall_time = float(stats.get("wall_clock_sec", manifest.get("wall_clock_sec", 0.0)) or 0.0)
+    run_start_wall_ts = float(stats.get("run_start_wall_ts", 0.0) or 0.0)
+    run_end_wall_ts = float(stats.get("run_end_wall_ts", 0.0) or 0.0)
+    pre_trace_sec = 0.0
+    post_trace_sec = 0.0
+    if trace.trace_start_ts is not None and run_start_wall_ts > 0:
+        pre_trace_sec = max(0.0, trace.trace_start_ts / 1_000_000.0 - run_start_wall_ts)
+    if trace.trace_end_ts is not None and run_end_wall_ts > 0:
+        post_trace_sec = max(0.0, run_end_wall_ts - trace.trace_end_ts / 1_000_000.0)
+    if trace.trace_event_count == 0:
+        pre_trace_sec = 0.0
+        post_trace_sec = 0.0
+    remaining_wall = max(0.0, wall_time - pre_trace_sec - post_trace_sec)
+    trace_window_sec = min(remaining_wall, trace.trace_window_sec)
+    worker_wrapper_sec = max(0.0, trace.udf_time_sec - trace.compute_time_sec)
+    residual_sec = max(
+        0.0,
+        wall_time
+        - trace.transfer_time_sec
+        - trace.compute_time_sec
+        - worker_wrapper_sec
+        - pre_trace_sec
+        - post_trace_sec
+        - trace.untraced_in_window_sec,
+    )
+    untraced_engine_runtime_sec = residual_sec
     udf_share = (trace.udf_time_sec / wall_time * 100.0) if wall_time > 0 else 0.0
     transfer_share = (trace.transfer_time_sec / wall_time * 100.0) if wall_time > 0 else 0.0
     compute_share = (trace.compute_time_sec / wall_time * 100.0) if wall_time > 0 else 0.0
@@ -279,6 +364,45 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
         "UDFTime_sec": trace.udf_time_sec,
         "TransferTime_sec": trace.transfer_time_sec,
         "TraceComputeTime_sec": trace.compute_time_sec,
+        "ModelLoadTime_sec": trace.model_load_time_sec,
+        "TokenizeTime_sec": trace.tokenize_time_sec,
+        "InferenceTime_sec": trace.inference_time_sec,
+        "DetokenizeTime_sec": trace.detokenize_time_sec,
+        "ScoreTime_sec": trace.score_time_sec,
+        "EmbedTime_sec": trace.embed_time_sec,
+        "SimilarityTime_sec": trace.similarity_time_sec,
+        "TrivialComputeTime_sec": trace.trivial_compute_time_sec,
+        "OtherTraceTime_sec": trace.other_time_sec,
+        "WorkerWrapperTime_sec": round(worker_wrapper_sec, 6),
+        "PreTrace_sec": round(pre_trace_sec, 6),
+        "TraceWindow_sec": round(trace_window_sec, 6),
+        "UntracedInWindow_sec": trace.untraced_in_window_sec,
+        "PostTrace_sec": round(post_trace_sec, 6),
+        "UntracedEngineRuntime_sec": round(untraced_engine_runtime_sec, 6),
+        "BoundaryTax_sec": round(
+            trace.transfer_time_sec
+            + worker_wrapper_sec
+            + pre_trace_sec
+            + trace.untraced_in_window_sec
+            + post_trace_sec,
+            6,
+        ),
+        "BoundaryTax_pct": round(
+            (
+                (
+                    trace.transfer_time_sec
+                    + worker_wrapper_sec
+                    + pre_trace_sec
+                    + trace.untraced_in_window_sec
+                    + post_trace_sec
+                )
+                / wall_time
+                * 100.0
+            )
+            if wall_time > 0
+            else 0.0,
+            3,
+        ),
         "UDFShare_pct": round(udf_share, 3),
         "TransferShare_pct": round(transfer_share, 3),
         "TraceComputeShare_pct": round(compute_share, 3),
@@ -760,21 +884,24 @@ def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
             "Config",
             "WallTime",
             "TransferTime_sec",
-            "UDFTime_sec",
             "TraceComputeTime_sec",
+            "WorkerWrapperTime_sec",
+            "PreTrace_sec",
+            "UntracedInWindow_sec",
+            "PostTrace_sec",
+            "UntracedEngineRuntime_sec",
+            "BoundaryTax_sec",
         ]
     ].copy()
     rows["Serialization_sec"] = rows["TransferTime_sec"].fillna(0.0).clip(lower=0.0)
-    rows["Compute_sec"] = (
-        rows["UDFTime_sec"].fillna(0.0) + rows["TraceComputeTime_sec"].fillna(0.0)
+    rows["Compute_sec"] = rows["TraceComputeTime_sec"].fillna(0.0).clip(lower=0.0)
+    rows["Startup_sec"] = rows["PreTrace_sec"].fillna(0.0).clip(lower=0.0)
+    rows["ActiveGap_sec"] = (
+        rows["WorkerWrapperTime_sec"].fillna(0.0)
+        + rows["UntracedInWindow_sec"].fillna(0.0)
+        + rows["UntracedEngineRuntime_sec"].fillna(0.0)
     ).clip(lower=0.0)
-    rows["Accounted_sec"] = (rows["Serialization_sec"] + rows["Compute_sec"]).clip(
-        lower=0.0
-    )
-    rows["Untimed_sec"] = rows.apply(
-        lambda row: max(0.0, float(row["WallTime"]) - float(row["Accounted_sec"])),
-        axis=1,
-    )
+    rows["Tail_sec"] = rows["PostTrace_sec"].fillna(0.0).clip(lower=0.0)
     agg = (
         rows.groupby(["Workload", "Config"], dropna=False, as_index=False)
         .mean(numeric_only=True)
@@ -795,8 +922,19 @@ def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
             serial_sec = round(min(wall_sec, float(row["Serialization_sec"])), 6)
             compute_cap = max(0.0, wall_sec - serial_sec)
             compute_sec = round(min(compute_cap, float(row["Compute_sec"])), 6)
-            untimed_sec = round(max(0.0, wall_sec - serial_sec - compute_sec), 6)
-            denom = max(wall_sec, serial_sec + compute_sec + untimed_sec, 1e-12)
+            startup_cap = max(0.0, wall_sec - serial_sec - compute_sec)
+            startup_sec = round(min(startup_cap, float(row["Startup_sec"])), 6)
+            active_gap_cap = max(0.0, wall_sec - serial_sec - compute_sec - startup_sec)
+            active_gap_sec = round(min(active_gap_cap, float(row["ActiveGap_sec"])), 6)
+            tail_sec = round(
+                max(0.0, wall_sec - serial_sec - compute_sec - startup_sec - active_gap_sec),
+                6,
+            )
+            denom = max(
+                wall_sec,
+                serial_sec + compute_sec + startup_sec + active_gap_sec + tail_sec,
+                1e-12,
+            )
             bars.append(
                 {
                     "workload": workload,
@@ -805,10 +943,16 @@ def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
                     "wall_sec": wall_sec,
                     "serial_sec": serial_sec,
                     "compute_sec": compute_sec,
-                    "untimed_sec": untimed_sec,
+                    "startup_sec": startup_sec,
+                    "active_gap_sec": active_gap_sec,
+                    "tail_sec": tail_sec,
                     "serial_pct": round(serial_sec / denom * 100.0, 3),
                     "compute_pct": round(compute_sec / denom * 100.0, 3),
-                    "untimed_pct": round(untimed_sec / denom * 100.0, 3),
+                    "startup_pct": round(startup_sec / denom * 100.0, 3),
+                    "active_gap_pct": round(active_gap_sec / denom * 100.0, 3),
+                    "tail_pct": round(tail_sec / denom * 100.0, 3),
+                    "boundary_tax_sec": round(float(row["BoundaryTax_sec"]), 6),
+                    "boundary_tax_pct": round(float(row["BoundaryTax_sec"]) / denom * 100.0, 3),
                 }
             )
         workloads.append({"workload": workload, "bars": bars})
@@ -833,18 +977,21 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
     return """
 <div class="card overhead-card">
   <h2>Runtime Budget Breakdown</h2>
-  <p class="section-note">This consolidated D3 view replaces the older overhead and serialization plots with one trace-accounted runtime budget. Each workload panel compares execution configs by share of wall time, split into traced serialization, traced compute, and residual untimed or framework time. Right-edge labels show mean wall time.</p>
+  <p class="section-note">This consolidated D3 view replaces the older overhead and serialization plots with one trace-accounted runtime budget. Each workload panel compares execution configs by share of wall time, split into direct conversion / transfer, traced compute, startup / dispatch, untraced active-window runtime, and tail / materialization. Right-edge labels show mean wall time.</p>
+  <p class="section-note">For Spark paths, the full boundary tax is broader than the direct conversion bar alone. It includes dispatch, worker/bootstrap cost, untraced runtime mediation, and tail materialization. Small traced compute in mock-model CPU runs means little compute was performed, not that one engine computes faster.</p>
   <div class="overhead-legend">
     <div class="overhead-legend-group">
       <span class="overhead-legend-title">Execution configs</span>
       <div class="overhead-config-grid">__LEGEND__</div>
     </div>
     <div class="overhead-legend-group">
-      <span class="overhead-legend-title">Trace-accounted components</span>
+      <span class="overhead-legend-title">Attribution buckets</span>
       <div class="overhead-component-grid">
-        <span class="overhead-component-pill"><span class="overhead-swatch overhead-serial"></span>Serialization / transfer</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-serial"></span>Direct conversion / transfer</span>
         <span class="overhead-component-pill"><span class="overhead-swatch overhead-compute"></span>Traced compute</span>
-        <span class="overhead-component-pill"><span class="overhead-swatch overhead-untimed"></span>Untimed / framework</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-startup"></span>Startup / dispatch</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-gap"></span>Untraced active runtime</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-tail"></span>Tail / materialization</span>
         <span class="overhead-component-pill"><span class="overhead-swatch overhead-total"></span>Total wall time label</span>
       </div>
     </div>
@@ -864,9 +1011,11 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
   .overhead-config-pill strong { color: #0f172a; }
   .overhead-config-pill span { white-space: nowrap; }
   .overhead-swatch { width: 11px; height: 11px; border-radius: 999px; display: inline-block; flex: 0 0 auto; }
-  .overhead-serial { background: #d97706; }
-  .overhead-compute { background: #2f9e44; }
-  .overhead-untimed { background: #e25a1c; }
+  .overhead-serial { background: #d9a35f; }
+  .overhead-compute { background: #6fb686; }
+  .overhead-startup { background: #7ea6d8; }
+  .overhead-gap { background: #d38c6a; }
+  .overhead-tail { background: #a993cf; }
   .overhead-total { background: #94a3b8; }
   .overhead-chart-shell { margin-top: 6px; }
   .overhead-chart-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
@@ -907,9 +1056,11 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
     .attr("class", "overhead-tooltip");
 
   const palette = {
-    serial: "#d97706",
-    compute: "#2f9e44",
-    untimed: "#e3c1ca",
+    serial: "#d9a35f",
+    compute: "#6fb686",
+    startup: "#7ea6d8",
+    activeGap: "#d38c6a",
+    tail: "#a993cf",
     grid: "#e2e8f0",
     axis: "#94a3b8",
   };
@@ -943,10 +1094,13 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
       .style("opacity", 1)
       .html(`
         <strong>${datum.workload} · Config ${datum.config}</strong>
-        <div class="metric"><span>Serialization</span><span>${formatSeconds(datum.serial_sec)} · ${formatPercent(datum.serial_pct)}</span></div>
+        <div class="metric"><span>Direct conversion / transfer</span><span>${formatSeconds(datum.serial_sec)} · ${formatPercent(datum.serial_pct)}</span></div>
         <div class="metric"><span>Traced compute</span><span>${formatSeconds(datum.compute_sec)} · ${formatPercent(datum.compute_pct)}</span></div>
-        <div class="metric"><span>Untimed / framework</span><span>${formatSeconds(datum.untimed_sec)} · ${formatPercent(datum.untimed_pct)}</span></div>
+        <div class="metric"><span>Startup / dispatch</span><span>${formatSeconds(datum.startup_sec)} · ${formatPercent(datum.startup_pct)}</span></div>
+        <div class="metric"><span>Untraced active runtime</span><span>${formatSeconds(datum.active_gap_sec)} · ${formatPercent(datum.active_gap_pct)}</span></div>
+        <div class="metric"><span>Tail / materialization</span><span>${formatSeconds(datum.tail_sec)} · ${formatPercent(datum.tail_pct)}</span></div>
         <div class="metric"><span>Total wall time</span><span>${formatSeconds(datum.wall_sec)}</span></div>
+        <div class="metric"><span>Derived boundary tax</span><span>${formatSeconds(datum.boundary_tax_sec)} · ${formatPercent(datum.boundary_tax_pct)}</span></div>
       `);
 
     const pad = 18;
@@ -1056,9 +1210,25 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
         .attr("class", "segment")
         .attr("x", (d) => xScale(d.serial_pct + d.compute_pct))
         .attr("y", 0)
-        .attr("width", (d) => Math.max(0, xScale(d.untimed_pct)))
+        .attr("width", (d) => Math.max(0, xScale(d.startup_pct)))
         .attr("height", barHeight)
-        .attr("fill", palette.untimed);
+        .attr("fill", palette.startup);
+
+      barGroups.append("rect")
+        .attr("class", "segment")
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct + d.startup_pct))
+        .attr("y", 0)
+        .attr("width", (d) => Math.max(0, xScale(d.active_gap_pct)))
+        .attr("height", barHeight)
+        .attr("fill", palette.activeGap);
+
+      barGroups.append("rect")
+        .attr("class", "segment")
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct + d.startup_pct + d.active_gap_pct))
+        .attr("y", 0)
+        .attr("width", (d) => Math.max(0, xScale(d.tail_pct)))
+        .attr("height", barHeight)
+        .attr("fill", palette.tail);
 
       barGroups.filter((d) => d.serial_pct >= 9).append("text")
         .attr("class", "overhead-share-label")
@@ -1076,12 +1246,26 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
         .attr("fill", "#fff")
         .text((d) => formatPercent(d.compute_pct));
 
-      barGroups.filter((d) => d.untimed_pct >= 8).append("text")
+      barGroups.filter((d) => d.startup_pct >= 8).append("text")
         .attr("class", "overhead-share-label")
-        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct + d.untimed_pct / 2))
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct + d.startup_pct / 2))
         .attr("y", barHeight / 2 + 4)
         .attr("text-anchor", "middle")
-        .text((d) => formatPercent(d.untimed_pct));
+        .text((d) => formatPercent(d.startup_pct));
+
+      barGroups.filter((d) => d.active_gap_pct >= 8).append("text")
+        .attr("class", "overhead-share-label")
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct + d.startup_pct + d.active_gap_pct / 2))
+        .attr("y", barHeight / 2 + 4)
+        .attr("text-anchor", "middle")
+        .text((d) => formatPercent(d.active_gap_pct));
+
+      barGroups.filter((d) => d.tail_pct >= 8).append("text")
+        .attr("class", "overhead-share-label")
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct + d.startup_pct + d.active_gap_pct + d.tail_pct / 2))
+        .attr("y", barHeight / 2 + 4)
+        .attr("text-anchor", "middle")
+        .text((d) => formatPercent(d.tail_pct));
 
       barGroups.append("text")
         .attr("class", "overhead-wall-label")
@@ -1090,18 +1274,11 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
         .attr("text-anchor", "start")
         .text((d) => formatSeconds(d.wall_sec, true));
 
-      g.append("text")
-        .attr("x", innerWidth + 10)
-        .attr("y", innerHeight + 28)
-        .attr("fill", "#1d4ed8")
-        .attr("font-size", 10)
-        .attr("font-weight", 700)
-        .text("wall");
     });
 
     const note = document.createElement("div");
     note.className = "overhead-note";
-    note.textContent = "W0 values average depth 1/2/3 within each config before computing the time-budget split.";
+    note.textContent = "Direct conversion / transfer is only the explicitly traced in-worker conversion cost. Derived boundary tax rolls up direct transfer, dispatch/startup, worker wrapper overhead, untraced active runtime, and tail/materialization. W0 values average depth 1/2/3 within each config before computing the time-budget split.";
     chartNode.appendChild(note);
   }
 

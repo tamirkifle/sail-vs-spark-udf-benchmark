@@ -32,11 +32,13 @@ class W0Chained(Workload):
     ])
 
     def __init__(self, depth: int = 1) -> None:
+        super().__init__()
         if depth < 1 or depth > 8:
             raise ValueError(f"depth must be in [1, 8], got {depth}")
         self.depth = depth
 
-    def init(self, cfg: dict) -> None:
+    def init(self, cfg: dict, timer=None) -> None:
+        self.bind_timer(timer)
         # No models to load.
         return None
 
@@ -46,8 +48,9 @@ class W0Chained(Workload):
 
     def apply(self, prompt_id: int, prompt_text: str) -> tuple:
         x = int(prompt_id)
-        for _ in range(self.depth):
-            x = self._stage(x)
+        with self._measure("TRIVIAL_COMPUTE"):
+            for _ in range(self.depth):
+                x = self._stage(x)
         return (int(prompt_id), int(x))
 
     def apply_batch(
@@ -55,5 +58,6 @@ class W0Chained(Workload):
     ) -> dict[str, list]:
         ids = list(prompt_ids)
         # Vectorised: d additions applied to each id
-        values = [i + self.depth for i in ids]
+        with self._measure("TRIVIAL_COMPUTE"):
+            values = [i + self.depth for i in ids]
         return {"prompt_id": ids, "value": values}

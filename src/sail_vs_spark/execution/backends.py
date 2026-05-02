@@ -93,7 +93,8 @@ class SparkRowBackend(ExecutionBackend):
             with stage._timer.measure("DATA_TRANSFER_IN"):
                 value = int(x)
             with stage._timer.measure("UDF_ROW_EXECUTION"):
-                out = value + 1
+                with stage._timer.measure("TRIVIAL_COMPUTE"):
+                    out = value + 1
             with stage._timer.measure("DATA_TRANSFER_OUT"):
                 result = int(out)
             _save_timer_trace(stage._timer)
@@ -127,7 +128,7 @@ class SparkRowBackend(ExecutionBackend):
                 pid_value = int(pid)
                 text_value = str(text)
             with apply_workload._timer.measure("UDF_ROW_EXECUTION"):
-                wl = build_initialized_workload(workload, closure_cfg)
+                wl = build_initialized_workload(workload, closure_cfg, timer=apply_workload._timer)
                 raw_out = wl.apply(pid_value, text_value)
             with apply_workload._timer.measure("DATA_TRANSFER_OUT"):
                 out = tuple(raw_out)
@@ -161,7 +162,7 @@ class SparkRowBackend(ExecutionBackend):
                 text_value = str(text)
 
             with gen_one._timer.measure("UDF_ROW_EXECUTION"):
-                wl = build_initialized_workload("w2", closure_cfg)
+                wl = build_initialized_workload("w2", closure_cfg, timer=gen_one._timer)
                 _, resp = wl.apply(0, text_value)
 
             with gen_one._timer.measure("DATA_TRANSFER_OUT"):
@@ -202,7 +203,8 @@ class SparkPandasBackend(ExecutionBackend):
             with stage._timer.measure("DATA_TRANSFER_IN"):
                 values = s.astype("int64", copy=False)
             with stage._timer.measure("UDF_BATCH_EXECUTION"):
-                out = values + 1
+                with stage._timer.measure("TRIVIAL_COMPUTE"):
+                    out = values + 1
             with stage._timer.measure("DATA_TRANSFER_OUT"):
                 result = out.astype("int64", copy=False)
             _save_timer_trace(stage._timer)
@@ -238,7 +240,7 @@ class SparkPandasBackend(ExecutionBackend):
                 ids = pid_s.tolist()
                 texts = text_s.tolist()
             with timer.measure("UDF_BATCH_EXECUTION"):
-                wl = build_initialized_workload(workload, closure_cfg)
+                wl = build_initialized_workload(workload, closure_cfg, timer=timer)
                 out = wl.apply_batch(ids, texts)
             with timer.measure("DATA_TRANSFER_OUT"):
                 result = pd.DataFrame(out)
@@ -271,7 +273,7 @@ class SparkPandasBackend(ExecutionBackend):
             with timer.measure("DATA_TRANSFER_IN"):
                 texts = text_s.tolist()
             with timer.measure("UDF_BATCH_EXECUTION"):
-                wl = build_initialized_workload("w2", closure_cfg)
+                wl = build_initialized_workload("w2", closure_cfg, timer=timer)
                 out = wl.apply_batch(range(len(texts)), texts)
             with timer.measure("DATA_TRANSFER_OUT"):
                 result = pd.Series(out["response"])
@@ -316,12 +318,13 @@ class SailArrowBackend(ExecutionBackend):
                     ids = batch.column("prompt_id")
                     vals = batch.column("value")
                 with timer.measure("UDF_BATCH_EXECUTION"):
-                    try:
-                        import pyarrow.compute as pc
+                    with timer.measure("TRIVIAL_COMPUTE"):
+                        try:
+                            import pyarrow.compute as pc
 
-                        bumped = pc.add(vals, 1)
-                    except Exception:
-                        bumped = pa.array([int(x) + 1 for x in vals.to_pylist()], type=pa.int64())
+                            bumped = pc.add(vals, 1)
+                        except Exception:
+                            bumped = pa.array([int(x) + 1 for x in vals.to_pylist()], type=pa.int64())
                 with timer.measure("DATA_TRANSFER_OUT"):
                     out_batch = pa.RecordBatch.from_arrays([ids, bumped], names=["prompt_id", "value"])
                 _save_timer_trace(timer)
@@ -353,7 +356,7 @@ class SailArrowBackend(ExecutionBackend):
         def process(batch_iter: Iterator["pa.RecordBatch"]) -> Iterator["pa.RecordBatch"]:
             os.environ.update(_ENV)
             timer = _new_timer(timer_label)
-            wl = build_initialized_workload(workload, closure_cfg)
+            wl = build_initialized_workload(workload, closure_cfg, timer=timer)
             for batch in batch_iter:
                 with timer.measure("DATA_TRANSFER_IN"):
                     ids = batch.column("prompt_id").to_pylist()
@@ -418,7 +421,8 @@ class SailUdtfBackend(ExecutionBackend):
                     pid_value = int(pid)
                     value = int(val)
                 with self._timer.measure("UDF_ROW_EXECUTION"):
-                    out = (pid_value, value + 1)
+                    with self._timer.measure("TRIVIAL_COMPUTE"):
+                        out = (pid_value, value + 1)
                 with self._timer.measure("DATA_TRANSFER_OUT"):
                     result = (int(out[0]), int(out[1]))
                 _save_timer_trace(self._timer)
@@ -464,7 +468,7 @@ class SailUdtfBackend(ExecutionBackend):
                     import os
 
                     os.environ.update(_ENV)
-                    self._wl = build_initialized_workload(workload, closure_cfg)
+                    self._wl = build_initialized_workload(workload, closure_cfg, timer=self._timer)
                 with self._timer.measure("DATA_TRANSFER_IN"):
                     row = (int(prompt_id), str(prompt_text))
                 self._buffer.append(row)

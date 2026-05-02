@@ -10,6 +10,7 @@ from sail_vs_spark.models.loaders import (
     get_embedder, get_generator, get_scorer, reset_singletons,
 )
 from sail_vs_spark.models.mock import MockEmbedder, MockGenerator, MockScorer
+from sail_vs_spark.profiling.boundary_timer import BoundaryTimer
 
 
 def setup_function(_) -> None:
@@ -183,3 +184,19 @@ def test_get_embedder_falls_back_to_mock():
                         "dim": 16})
     [v] = emb.encode(["hi"])
     assert len(v) == 16
+
+
+def test_mock_models_emit_phase_timing_when_timer_bound():
+    timer = BoundaryTimer("mock-phases")
+    gen = get_generator({"name": "g", "prefer_mock": True, "device": "cpu"}, timer=timer)
+    scorer = get_scorer({"name": "s", "prefer_mock": True, "device": "cpu"}, timer=timer)
+    embedder = get_embedder({"name": "e", "prefer_mock": True, "device": "cpu", "dim": 8}, timer=timer)
+
+    gen.generate(["hello"], n=2)
+    scorer.score(["hello"], ["world"])
+    embedder.encode(["hello"])
+
+    report = timer.report()
+    assert report["phases"]["INFERENCE"]["call_count"] == 1
+    assert report["phases"]["SCORE"]["call_count"] == 1
+    assert report["phases"]["EMBED"]["call_count"] == 1

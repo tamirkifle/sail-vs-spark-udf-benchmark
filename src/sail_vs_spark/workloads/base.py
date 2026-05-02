@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from sail_vs_spark.profiling.boundary_timer import optional_measure
+
 
 @dataclass
 class WorkloadResult:
@@ -35,7 +37,17 @@ class Workload:
     name: str = "base"
     result: WorkloadResult = WorkloadResult(output_columns=[])
 
-    def init(self, cfg: dict) -> None:  # pragma: no cover
+    def __init__(self) -> None:
+        self._timer = None
+
+    def bind_timer(self, timer: Any) -> "Workload":
+        self._timer = timer
+        return self
+
+    def _measure(self, phase: str):
+        return optional_measure(self._timer, phase)
+
+    def init(self, cfg: dict, timer: Any | None = None) -> None:  # pragma: no cover
         """Load models + warm caches. Called once per worker."""
         raise NotImplementedError
 

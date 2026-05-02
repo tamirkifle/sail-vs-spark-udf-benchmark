@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, List, Sequence
 
 from .compat import model_cache_dir, resolve_model_path
+from ..profiling.boundary_timer import optional_measure
 
 
 class _VLLMGenerator:
@@ -28,6 +29,7 @@ class _VLLMGenerator:
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 50,
+        timer=None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self.model_id = model_id
@@ -35,6 +37,11 @@ class _VLLMGenerator:
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
+        self._timer = timer
+
+    def bind_timer(self, timer):
+        self._timer = timer
+        return self
 
     def generate(
         self,
@@ -54,18 +61,19 @@ class _VLLMGenerator:
         results: List[List[str]] = []
 
         for prompt in list(prompts):
-            payload: dict[str, Any] = {
-                "model": self.model_id,
-                "messages": [{"role": "user", "content": prompt}],
-                "n": n,
-                "max_tokens": max_tok,
-                "temperature": 0 if greedy else self.temperature,
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
-            if not greedy:
-                payload["top_p"] = self.top_p
-                payload["top_k"] = self.top_k
-            body = json.dumps(payload).encode()
+            with optional_measure(getattr(self, "_timer", None), "TOKENIZE"):
+                payload: dict[str, Any] = {
+                    "model": self.model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "n": n,
+                    "max_tokens": max_tok,
+                    "temperature": 0 if greedy else self.temperature,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                }
+                if not greedy:
+                    payload["top_p"] = self.top_p
+                    payload["top_k"] = self.top_k
+                body = json.dumps(payload).encode()
             req = urllib.request.Request(
                 f"{self.server_url}/v1/chat/completions",
                 data=body,
@@ -73,20 +81,22 @@ class _VLLMGenerator:
                 method="POST",
             )
             opener = self._get_opener()
-            for attempt in range(3):
-                try:
-                    with opener.open(req, timeout=300) as resp:
-                        data = json.loads(resp.read())
-                    break
-                except urllib.error.HTTPError as e:
-                    body_snippet = e.read(512).decode(errors="replace")
-                    raise RuntimeError(f"vLLM {e.code} {e.reason}: {body_snippet}") from e
-                except urllib.error.URLError:
-                    if attempt == 2:
-                        raise
-                    time.sleep(2**attempt)
+            with optional_measure(getattr(self, "_timer", None), "INFERENCE"):
+                for attempt in range(3):
+                    try:
+                        with opener.open(req, timeout=300) as resp:
+                            data = json.loads(resp.read())
+                        break
+                    except urllib.error.HTTPError as e:
+                        body_snippet = e.read(512).decode(errors="replace")
+                        raise RuntimeError(f"vLLM {e.code} {e.reason}: {body_snippet}") from e
+                    except urllib.error.URLError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(2**attempt)
 
-            candidates = [think_re.sub("", c["message"]["content"]).strip() for c in data["choices"]]
+            with optional_measure(getattr(self, "_timer", None), "DETOKENIZE"):
+                candidates = [think_re.sub("", c["message"]["content"]).strip() for c in data["choices"]]
             results.append(candidates)
 
         return results
@@ -102,6 +112,7 @@ class _HFScorer:
         *,
         score_batch_size: int = 8,
         max_length: int = 384,
+        timer=None,
     ) -> None:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -122,6 +133,11 @@ class _HFScorer:
         self.score_batch_size = max(1, int(score_batch_size))
         self.max_length = max(1, int(max_length))
         self.mdl.eval()
+        self._timer = timer
+
+    def bind_timer(self, timer):
+        self._timer = timer
+        return self
 
     def score(self, prompts: Sequence[str], responses: Sequence[str]) -> List[float]:
         prompt_list = list(prompts)
@@ -135,17 +151,19 @@ class _HFScorer:
         scores: list[float] = []
         for start in range(0, len(prompt_list), self.score_batch_size):
             end = start + self.score_batch_size
-            inputs = self.tok(
-                prompt_list[start:end],
-                response_list[start:end],
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-            )
-            inputs = {k: v.to(self.mdl.device) for k, v in inputs.items()}
-            with self._torch.no_grad():
-                logits = self.mdl(**inputs).logits.squeeze(-1)
+            with optional_measure(getattr(self, "_timer", None), "TOKENIZE"):
+                inputs = self.tok(
+                    prompt_list[start:end],
+                    response_list[start:end],
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=self.max_length,
+                )
+                inputs = {k: v.to(self.mdl.device) for k, v in inputs.items()}
+            with optional_measure(getattr(self, "_timer", None), "SCORE"):
+                with self._torch.no_grad():
+                    logits = self.mdl(**inputs).logits.squeeze(-1)
             scores.extend(logits.float().cpu().tolist())
         return scores
 
@@ -153,7 +171,7 @@ class _HFScorer:
 class _STEmbedder:
     """Wraps sentence-transformers with native batching."""
 
-    def __init__(self, model_id: str, device: str) -> None:
+    def __init__(self, model_id: str, device: str, timer=None) -> None:
         from sentence_transformers import SentenceTransformer
 
         model_name = resolve_model_path(model_id)
@@ -162,11 +180,17 @@ class _STEmbedder:
             device=device,
             cache_folder=str(model_cache_dir()),
         )
+        self._timer = timer
+
+    def bind_timer(self, timer):
+        self._timer = timer
+        return self
 
     def encode(self, texts: Sequence[str]) -> List[List[float]]:
         import numpy as np
 
-        vectors = self.model.encode(list(texts), normalize_embeddings=True, batch_size=32)
+        with optional_measure(getattr(self, "_timer", None), "EMBED"):
+            vectors = self.model.encode(list(texts), normalize_embeddings=True, batch_size=32)
         return np.asarray(vectors).astype("float32").tolist()
 
     @staticmethod

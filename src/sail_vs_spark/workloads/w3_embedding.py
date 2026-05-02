@@ -55,16 +55,18 @@ class W3Embedding(Workload):
     ])
 
     def __init__(self, n_queries: int = 5) -> None:
+        super().__init__()
         self.n_queries = min(max(1, n_queries), len(_REFERENCE_QUERIES))
         self._emb = None
         self._refs: List[List[float]] | None = None
 
-    def init(self, cfg: dict) -> None:
+    def init(self, cfg: dict, timer=None) -> None:
         from ..models.loaders import get_embedder
+        self.bind_timer(timer)
         mcfg = dict(cfg.get("models", {}).get("embedder", {}))
         mcfg.setdefault("device",
                         cfg.get("hardware", {}).get("device", "auto"))
-        self._emb = get_embedder(mcfg)
+        self._emb = get_embedder(mcfg, timer=self._timer)
         self._refs = self._emb.encode(_REFERENCE_QUERIES[: self.n_queries])
 
     def _ensure_init(self) -> None:
@@ -82,8 +84,9 @@ class W3Embedding(Workload):
     def apply(self, prompt_id: int, prompt_text: str) -> tuple:
         self._ensure_init()
         [v] = self._emb.encode([prompt_text])
-        sims = [self._cosine(v, ref) for ref in self._refs]
-        best = max(range(len(sims)), key=lambda i: sims[i])
+        with self._measure("SIMILARITY"):
+            sims = [self._cosine(v, ref) for ref in self._refs]
+            best = max(range(len(sims)), key=lambda i: sims[i])
         return (int(prompt_id), int(best), float(sims[best]))
 
     def apply_batch(
@@ -96,11 +99,12 @@ class W3Embedding(Workload):
 
         best_idx: list[int] = []
         best_sim: list[float] = []
-        for v in vecs:
-            sims = [self._cosine(v, ref) for ref in self._refs]
-            k = max(range(len(sims)), key=lambda i: sims[i])
-            best_idx.append(int(k))
-            best_sim.append(float(sims[k]))
+        with self._measure("SIMILARITY"):
+            for v in vecs:
+                sims = [self._cosine(v, ref) for ref in self._refs]
+                k = max(range(len(sims)), key=lambda i: sims[i])
+                best_idx.append(int(k))
+                best_sim.append(float(sims[k]))
 
         return {
             "prompt_id": ids,

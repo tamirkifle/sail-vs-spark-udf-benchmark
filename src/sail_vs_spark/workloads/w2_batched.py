@@ -26,16 +26,18 @@ class W2Batched(Workload):
     ])
 
     def __init__(self) -> None:
+        super().__init__()
         self._gen = None
         self._cfg: dict = {}
 
-    def init(self, cfg: dict) -> None:
+    def init(self, cfg: dict, timer=None) -> None:
         from ..models.loaders import get_generator
+        self.bind_timer(timer)
         self._cfg = cfg
         mcfg = dict(cfg.get("models", {}).get("generator", {}))
         mcfg.setdefault("device",
                         cfg.get("hardware", {}).get("device", "auto"))
-        self._gen = get_generator(mcfg)
+        self._gen = get_generator(mcfg, timer=self._timer)
 
     def _ensure_init(self) -> None:
         if self._gen is None:
