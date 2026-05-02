@@ -346,6 +346,7 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
         mb_written_delta = 0.0
         disk_write_source = "none"
     write_throughput_mb_s = float(stats.get("write_throughput_mb_s", 0.0) or 0.0)
+    pipeline_continuity = _float_or_none(stats.get("pipeline_continuity"))
 
     return {
         "RunID": manifest["run_id"],
@@ -370,15 +371,22 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
         "AvgCPU_pct": float(stats.get("avg_cpu_pct", 0.0) or 0.0),
         "PeakRSS_MB": float(stats.get("peak_rss_mb", 0.0) or 0.0),
         "AvgRSS_MB": float(stats.get("avg_rss_mb", 0.0) or 0.0),
+        "AvgProcessTreeCPU_pct": float(stats.get("avg_process_tree_cpu_pct", 0.0) or 0.0),
+        "PeakProcessTreeRSS_MB": float(stats.get("peak_process_tree_rss_mb", 0.0) or 0.0),
+        "AvgProcessTreeRSS_MB": float(stats.get("avg_process_tree_rss_mb", 0.0) or 0.0),
+        "SampledChildProcesses": int(stats.get("sampled_child_processes", 0) or 0),
         "PeakHostRam_GB": float(stats.get("peak_host_ram_gb", 0.0) or 0.0),
         "AvgHostRam_pct": _sample_metric(samples, "host_ram_pct", lambda vs: sum(vs) / len(vs)),
         "PeakHostRam_pct": _sample_metric(samples, "host_ram_pct", max),
+        "GpuTelemetryAvailable": bool(stats.get("gpu_telemetry_available", False)),
         "AvgGPUUtil_pct": float(stats.get("avg_gpu_util_pct", 0.0) or 0.0),
         "PeakGPUUtil_pct": float(stats.get("peak_gpu_util_pct", 0.0) or 0.0),
         "AvgGPUMemUtil_pct": float(stats.get("avg_gpu_mem_util_pct", 0.0) or 0.0),
         "PeakGPUMemUsed_MB": float(stats.get("peak_gpu_mem_used_mb", 0.0) or 0.0),
         "AvgGPUPower_W": float(stats.get("avg_gpu_power_w", 0.0) or 0.0),
-        "PipelineContinuity": float(stats.get("pipeline_continuity", 0.0) or 0.0),
+        "PipelineContinuityAvailable": bool(stats.get("pipeline_continuity_available", pipeline_continuity is not None)),
+        "PipelineContinuity": pipeline_continuity,
+        "VllmTelemetryAvailable": bool(stats.get("vllm_telemetry_available", False)),
         "AvgVLLMGPUCacheUsage_pct": float(stats.get("avg_vllm_gpu_cache_usage_pct", 0.0) or 0.0),
         "PeakVLLMGPUCacheUsage_pct": float(stats.get("peak_vllm_gpu_cache_usage_pct", 0.0) or 0.0),
         "PeakVLLMRequestsRunning": float(stats.get("peak_vllm_requests_running", 0.0) or 0.0),
@@ -489,6 +497,7 @@ def _build_summary_df(run_df: pd.DataFrame) -> pd.DataFrame:
         warm_mean = float(warm["WallTime"].mean()) if has_warm else float("nan")
         warm_std = float(warm["WallTime"].std()) if has_warm and len(warm) > 1 else 0.0
         perf_time = float(perf["WallTime"].mean())  # warm if available, else cold
+        pipeline_continuity = _mean_or_none(group["PipelineContinuity"])
         udf_mean = float(perf["UDFTime_sec"].mean())
         transfer_mean = float(perf["TransferTime_sec"].mean())
         trace_compute_mean = float(perf["TraceComputeTime_sec"].mean())
@@ -517,10 +526,15 @@ def _build_summary_df(run_df: pd.DataFrame) -> pd.DataFrame:
                 "UDF Share (%)": round(float(perf["UDFShare_pct"].mean()), 2),
                 "Transfer Share (%)": round(float(perf["TransferShare_pct"].mean()), 2),
                 "Peak RSS (MB)": round(float(group["PeakRSS_MB"].max()), 2),
+                "Peak Process Tree RSS (MB)": round(float(group["PeakProcessTreeRSS_MB"].max()), 2),
                 "Avg CPU (%)": round(float(group["AvgCPU_pct"].mean()), 2),
+                "Avg Process Tree CPU (%)": round(float(group["AvgProcessTreeCPU_pct"].mean()), 2),
                 "Peak GPU Util (%)": round(float(group["PeakGPUUtil_pct"].max()), 2),
-                "Pipeline Continuity": round(float(group["PipelineContinuity"].mean()), 3),
+                "GPU Telemetry Available": bool(group["GpuTelemetryAvailable"].any()),
+                "Pipeline Continuity Available": bool(group["PipelineContinuityAvailable"].any()),
+                "Pipeline Continuity": round(pipeline_continuity, 3) if pipeline_continuity is not None else None,
                 "Avg GPU Power (W)": round(float(group["AvgGPUPower_W"].mean()), 2),
+                "vLLM Telemetry Available": bool(group["VllmTelemetryAvailable"].any()),
                 "Disk Write (MB)": round(float(group["DiskWrite_MB"].mean()), 3),
                 "Measured Runtime Writes (MB)": round(float(group["MeasuredDiskWrite_MB"].mean()), 3),
                 "Output Materialized (MB)": round(float(group["OutputMaterialized_MB"].mean()), 3),
@@ -907,11 +921,30 @@ def _build_tel_cards(rows: pd.DataFrame) -> tuple[list[dict], dict]:
         cfgs = rows[rows["Workload"] == workload].to_dict("records")
         if cfgs:
             best_gpu  = max(c["Peak GPU Util (%)"]  for c in cfgs)
-            best_cont = max(c["Pipeline Continuity"] for c in cfgs)
+            cont_candidates = [
+                float(c["Pipeline Continuity"])
+                for c in cfgs
+                if not pd.isna(c.get("Pipeline Continuity"))
+            ]
+            best_cont = max(cont_candidates) if cont_candidates else None
             min_disk  = min(c["Disk Write (MB)"] for c in cfgs)
             for c in cfgs:
                 c["BestGPU"]  = abs(c["Peak GPU Util (%)"]  - best_gpu)  < 0.05
-                c["BestCont"] = abs(c["Pipeline Continuity"] - best_cont) < 1e-6
+                c["ContinuityDisplay"] = (
+                    "N/A"
+                    if pd.isna(c.get("Pipeline Continuity"))
+                    else f"{float(c['Pipeline Continuity']):.3f}"
+                )
+                c["ContinuityBarPct"] = (
+                    0
+                    if pd.isna(c.get("Pipeline Continuity"))
+                    else max(2, round(float(c["Pipeline Continuity"]) * 100))
+                )
+                c["BestCont"] = (
+                    best_cont is not None
+                    and not pd.isna(c.get("Pipeline Continuity"))
+                    and abs(float(c["Pipeline Continuity"]) - best_cont) < 1e-6
+                )
                 c["BestDisk"] = abs(c["Disk Write (MB)"] - min_disk) < 1e-6
                 c["DiskDisplayLabel"] = (
                     "Runtime writes"
@@ -1465,6 +1498,13 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _mean_or_none(series: pd.Series) -> float | None:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.mean())
+
+
 def _build_gpu_utilization_payload(results_dir: Path) -> dict[str, Any]:
     configs = ["A", "B", "C", "D"]
     workloads_by_key: dict[str, list[dict[str, Any]]] = {}
@@ -1535,7 +1575,14 @@ def _build_gpu_utilization_payload(results_dir: Path) -> dict[str, Any]:
             "peak_gpu_util_pct": round(float(stats.get("peak_gpu_util_pct", 0.0) or 0.0), 3),
             "avg_gpu_power_w": round(float(stats.get("avg_gpu_power_w", 0.0) or 0.0), 3),
             "peak_gpu_mem_used_mb": round(float(stats.get("peak_gpu_mem_used_mb", 0.0) or 0.0), 3),
-            "pipeline_continuity": round(float(stats.get("pipeline_continuity", 0.0) or 0.0), 3),
+            "gpu_telemetry_available": bool(stats.get("gpu_telemetry_available", False)),
+            "pipeline_continuity_available": bool(stats.get("pipeline_continuity_available", stats.get("pipeline_continuity") is not None)),
+            "pipeline_continuity": (
+                round(float(stats["pipeline_continuity"]), 3)
+                if stats.get("pipeline_continuity") is not None
+                else None
+            ),
+            "vllm_telemetry_available": bool(stats.get("vllm_telemetry_available", False)),
             "avg_vllm_gpu_cache_usage_pct": round(float(stats.get("avg_vllm_gpu_cache_usage_pct", 0.0) or 0.0), 6),
             "peak_vllm_gpu_cache_usage_pct": round(float(stats.get("peak_vllm_gpu_cache_usage_pct", 0.0) or 0.0), 6),
             "peak_vllm_requests_running": round(float(stats.get("peak_vllm_requests_running", 0.0) or 0.0), 3),
@@ -1657,7 +1704,7 @@ def _build_gpu_utilization_section(chart_data: dict[str, Any]) -> str:
   }
 
   function fmtPct01(value) {
-    if (!Number.isFinite(value)) return "-";
+    if (!Number.isFinite(value)) return "N/A";
     const pct = value <= 1 ? value * 100 : value;
     return `${pct.toFixed(pct >= 10 ? 0 : 1)}%`;
   }
@@ -1755,7 +1802,8 @@ def _build_gpu_utilization_section(chart_data: dict[str, Any]) -> str:
   function renderCards(runs) {
     cardsNode.innerHTML = "";
     if (!runs.length) return;
-    const bestContinuity = d3.max(runs, (d) => d.pipeline_continuity) || 0;
+    const continuityValues = runs.map((d) => d.pipeline_continuity).filter((v) => Number.isFinite(v));
+    const bestContinuity = continuityValues.length ? d3.max(continuityValues) : null;
     const bestPeak = d3.max(runs, (d) => d.peak_gpu_util_pct) || 0;
     const bestKv = d3.max(runs, (d) => d.peak_vllm_gpu_cache_usage_pct) || 0;
     const maxTokenDelta = d3.max(runs, (d) => (d.vllm_prompt_tokens_delta || 0) + (d.vllm_generation_tokens_delta || 0)) || 0;
@@ -3246,7 +3294,7 @@ def _write_html(
         <div class="tel-card-header">{{ card.workload }}</div>
         {% for cfg in card.configs %}
         {% set gpu_pct  = [(cfg["Peak GPU Util (%)"]  / tel_maxes["Peak GPU Util (%)"]  * 100)|round|int, 2]|max %}
-        {% set cont_pct = [(cfg["Pipeline Continuity"] * 100)|round|int, 2]|max %}
+        {% set cont_pct = cfg["ContinuityBarPct"] %}
         <div class="tel-cfg-row {{ cfg['RowClass'] }}">
           <div class="tel-cfg-id">
             {{ cfg['LogoSVG'] | safe }}
@@ -3261,7 +3309,7 @@ def _write_html(
             <div class="tel-m">
               <span class="tel-lbl">Continuity</span>
               <div class="bar-track"><div class="bar-fill" style="width:{{ cont_pct }}%"></div></div>
-              <span class="tel-val {{ 'winner' if cfg['BestCont'] else '' }}">{{ "%.3f"|format(cfg["Pipeline Continuity"]) }}</span>
+              <span class="tel-val {{ 'winner' if cfg['BestCont'] else '' }}">{{ cfg["ContinuityDisplay"] }}</span>
             </div>
             <div class="tel-m">
               <span class="tel-lbl">CPU</span>

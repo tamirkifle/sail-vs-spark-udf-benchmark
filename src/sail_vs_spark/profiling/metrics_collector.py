@@ -260,6 +260,29 @@ class MetricsCollector:
             "write_bytes": int(getattr(io, "write_bytes", 0) or 0),
         }
 
+    def _sample_process_tree(self, proc: Any) -> dict[str, Any]:
+        processes = [proc]
+        try:
+            processes.extend(proc.children(recursive=True))
+        except Exception:
+            pass
+
+        cpu_total = 0.0
+        rss_total = 0
+        child_count = max(0, len(processes) - 1)
+        for process in processes:
+            try:
+                cpu_total += float(process.cpu_percent(interval=None) or 0.0)
+                rss_total += int(process.memory_info().rss or 0)
+            except Exception:
+                continue
+
+        return {
+            "process_tree_cpu_pct": round(cpu_total, 2),
+            "process_tree_rss_mb": round(rss_total / 1e6, 2),
+            "child_processes": child_count,
+        }
+
 
     def _sample_loop(self) -> None:
         import psutil
@@ -277,6 +300,11 @@ class MetricsCollector:
                 vm = psutil.virtual_memory()
                 sample["host_ram_used_gb"] = round(vm.used / 1e9, 2)
                 sample["host_ram_pct"] = vm.percent
+            except Exception:
+                pass
+
+            try:
+                sample.update(self._sample_process_tree(proc))
             except Exception:
                 pass
 
@@ -310,12 +338,22 @@ class MetricsCollector:
             s.get("gpu_util_pct", 0.0) for s in self._samples
             if "gpu_util_pct" in s
         ]
+        gpu_telemetry_available = bool(gpu_utils)
         if gpu_utils:
             gpu_active = sum(1 for u in gpu_utils
                              if u >= self.GPU_UTIL_ACTIVE_THRESHOLD)
             pipeline_continuity = round(gpu_active / len(gpu_utils), 3)
         else:
-            pipeline_continuity = 0.0
+            pipeline_continuity = None
+        vllm_telemetry_available = any(
+            any(str(key).startswith("vllm_") for key in sample)
+            for sample in self._samples
+        )
+
+        def vllm_value(key: str, fn) -> float | None:
+            if not vllm_telemetry_available:
+                return None
+            return fn(key)
 
         # Cumulative disk IO deltas
         if self._io_start is not None and self._samples:
@@ -337,19 +375,26 @@ class MetricsCollector:
             "avg_cpu_pct": avg("cpu_pct"),
             "peak_rss_mb": peak("rss_mb"),
             "avg_rss_mb": avg("rss_mb"),
+            "avg_process_tree_cpu_pct": avg("process_tree_cpu_pct"),
+            "peak_process_tree_rss_mb": peak("process_tree_rss_mb"),
+            "avg_process_tree_rss_mb": avg("process_tree_rss_mb"),
+            "sampled_child_processes": int(peak("child_processes")),
             "peak_host_ram_gb": peak("host_ram_used_gb"),
             # GPU
+            "gpu_telemetry_available": gpu_telemetry_available,
             "avg_gpu_util_pct": avg("gpu_util_pct"),
             "peak_gpu_util_pct": peak("gpu_util_pct"),
             "avg_gpu_mem_util_pct": avg("gpu_mem_util_pct"),
             "peak_gpu_mem_used_mb": peak("gpu_mem_used_mb"),
             "avg_gpu_power_w": avg("gpu_power_w"),
+            "pipeline_continuity_available": gpu_telemetry_available,
             "pipeline_continuity": pipeline_continuity,
             # vLLM
-            "avg_vllm_gpu_cache_usage_pct": avg("vllm_gpu_cache_usage_pct"),
-            "peak_vllm_gpu_cache_usage_pct": peak("vllm_gpu_cache_usage_pct"),
-            "peak_vllm_requests_running": peak("vllm_requests_running"),
-            "peak_vllm_requests_waiting": peak("vllm_requests_waiting"),
+            "vllm_telemetry_available": vllm_telemetry_available,
+            "avg_vllm_gpu_cache_usage_pct": vllm_value("vllm_gpu_cache_usage_pct", avg),
+            "peak_vllm_gpu_cache_usage_pct": vllm_value("vllm_gpu_cache_usage_pct", peak),
+            "peak_vllm_requests_running": vllm_value("vllm_requests_running", peak),
+            "peak_vllm_requests_waiting": vllm_value("vllm_requests_waiting", peak),
             # Disk
             "bytes_read_delta": int(read_delta),
             "bytes_written_delta": int(write_delta),

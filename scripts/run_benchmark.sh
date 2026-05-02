@@ -15,8 +15,9 @@ Common overrides:
   EXECUTIONS="A B"       Execution configs. Default comes from config.
   W0_DEPTHS="1 2 3"      W0 depths. Default comes from config.
   FORCE_SYNTHETIC=1      Force synthetic prompts. Default for mock mode.
+  SKIP_DATASET_PREP=1    Reuse existing dataset parquet from the config out_dir.
   START_SAIL=0|1         Override auto Sail server startup for C/D.
-  START_VLLM=0|1         Override auto vLLM startup for gpu/cpu_real modes.
+  START_VLLM=0|1         Override auto vLLM startup for gpu mode.
 USAGE
 }
 
@@ -105,7 +106,7 @@ WORKLOADS="${WORKLOADS:-w0 w1 w2 w3 w4}"
 EXECUTIONS="${EXECUTIONS:-$(yaml_expr "cfg.get('execution', {}).get('configs', ['A', 'B'])" "A B")}"
 W0_DEPTHS="${W0_DEPTHS:-$(yaml_expr "cfg.get('workloads', {}).get('w0_chained', {}).get('depths', [1])" "1")}"
 FORCE_SYNTHETIC="${FORCE_SYNTHETIC:-$([[ "$MODE" == "mock" ]] && echo 1 || echo 0)}"
-START_VLLM="${START_VLLM:-$([[ "$MODE" == "gpu" || "$MODE" == "cpu_real" ]] && echo 1 || echo 0)}"
+START_VLLM="${START_VLLM:-$([[ "$MODE" == "gpu" ]] && echo 1 || echo 0)}"
 
 MODELS_DIR="${MODELS_DIR:-$REPO_DIR/models}"
 export HF_HOME="${HF_HOME:-$MODELS_DIR}"
@@ -113,12 +114,22 @@ export HF_HUB_CACHE="${HF_HUB_CACHE:-$MODELS_DIR/hub}"
 export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-$MODELS_DIR}"
 mkdir -p "$MODELS_DIR" "$HF_HOME" "$HF_HUB_CACHE" "$RESULTS_DIR"
 
-prep_args=(--config "$CONFIG")
-if [[ "$FORCE_SYNTHETIC" == "1" ]]; then
-  prep_args+=(--force-synthetic)
+if [[ "${SKIP_DATASET_PREP:-0}" == "1" ]]; then
+  echo "[run] skipping dataset prep: config=$CONFIG"
+  DATASET_PARQUET="$(yaml_expr "cfg.get('dataset', {}).get('out_dir', 'data')" "data")/prompts.parquet"
+  if [[ ! -e "$DATASET_PARQUET" ]]; then
+    echo "[run] missing pre-staged dataset: $DATASET_PARQUET" >&2
+    echo "[run] run scripts/prep_dataset.py on a node with internet, or unset SKIP_DATASET_PREP" >&2
+    exit 1
+  fi
+else
+  prep_args=(--config "$CONFIG")
+  if [[ "$FORCE_SYNTHETIC" == "1" ]]; then
+    prep_args+=(--force-synthetic)
+  fi
+  echo "[run] preparing dataset: config=$CONFIG synthetic=$FORCE_SYNTHETIC"
+  "$PY" scripts/prep_dataset.py "${prep_args[@]}"
 fi
-echo "[run] preparing dataset: config=$CONFIG synthetic=$FORCE_SYNTHETIC"
-"$PY" scripts/prep_dataset.py "${prep_args[@]}"
 
 needs_sail=0
 for execution in $EXECUTIONS; do

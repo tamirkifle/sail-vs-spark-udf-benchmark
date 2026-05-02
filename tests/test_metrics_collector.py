@@ -25,6 +25,9 @@ def test_start_stop_produces_samples():
     # basic CPU/RAM fields should be populated on any machine
     assert stats["avg_cpu_pct"] >= 0
     assert stats["peak_rss_mb"] > 0
+    assert stats["avg_process_tree_cpu_pct"] >= 0
+    assert stats["peak_process_tree_rss_mb"] >= stats["peak_rss_mb"]
+    assert stats["sampled_child_processes"] >= 0
 
 
 def test_save_produces_valid_json(tmp_path):
@@ -48,9 +51,15 @@ def test_report_includes_pipeline_continuity_key():
     c.stop()
     r = c.report()
     assert "pipeline_continuity" in r
+    assert "gpu_telemetry_available" in r
+    assert "vllm_telemetry_available" in r
+    assert "pipeline_continuity_available" in r
     assert "bytes_written_delta" in r
     assert r["disk_counter_scope"] in {"process", "system", "unavailable"}
-    assert 0.0 <= r["pipeline_continuity"] <= 1.0
+    if r["pipeline_continuity"] is not None:
+        assert 0.0 <= r["pipeline_continuity"] <= 1.0
+    else:
+        assert r["pipeline_continuity_available"] is False
 
 
 def test_disk_io_fields_are_numeric():
@@ -119,3 +128,18 @@ def test_report_includes_vllm_summary_fields_from_samples():
     assert r["peak_vllm_gpu_cache_usage_pct"] == 0.75
     assert r["peak_vllm_requests_running"] == 3.0
     assert r["peak_vllm_requests_waiting"] == 2.0
+    assert r["vllm_telemetry_available"] is True
+
+
+def test_report_marks_missing_gpu_and_vllm_telemetry_unavailable():
+    c = MetricsCollector("telemetry-availability-test", sample_interval_sec=0.05)
+    c._start_time = time.perf_counter() - 1.0
+    c._end_time = time.perf_counter()
+    c._samples = [{"cpu_pct": 1.0, "rss_mb": 10.0}]
+    r = c.report()
+    assert r["gpu_telemetry_available"] is False
+    assert r["vllm_telemetry_available"] is False
+    assert r["pipeline_continuity_available"] is False
+    assert r["pipeline_continuity"] is None
+    assert r["avg_vllm_gpu_cache_usage_pct"] is None
+    assert r["peak_vllm_requests_running"] is None

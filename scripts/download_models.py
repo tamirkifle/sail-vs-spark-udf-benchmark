@@ -33,9 +33,11 @@ def download_models(configs: list[str], models_dir: str | None = None) -> None:
                 if m_cfg.get("prefer_mock", False):
                     continue
                 if m_type == "generator":
-                    # Real generation is served by vLLM. The server script can
-                    # point at an already-downloaded local models/<repo> folder.
-                    continue
+                    provider = str(m_cfg.get("provider", "") or "").lower()
+                    if provider not in {"transformers", "hf", "huggingface"}:
+                        # GPU real generation is served by vLLM. The server script can
+                        # point at an already-downloaded local models/<repo> folder.
+                        continue
                 if "name" in m_cfg:
                     models_to_download.add(m_cfg["name"])
                 if "fallback_name" in m_cfg:

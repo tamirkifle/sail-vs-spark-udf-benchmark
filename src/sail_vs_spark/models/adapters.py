@@ -102,6 +102,114 @@ class _VLLMGenerator:
         return results
 
 
+class _HFGenerator:
+    """Runs Hugging Face causal generation in-process on CPU."""
+
+    def __init__(
+        self,
+        model_id: str,
+        max_new_tokens: int = 128,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        timer=None,
+    ) -> None:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        model_name = resolve_model_path(model_id)
+        cache_dir = str(model_cache_dir())
+        self.tok = AutoTokenizer.from_pretrained(
+            model_name,
+            cache_dir=cache_dir,
+            trust_remote_code=True,
+        )
+        self.mdl = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float32,
+            cache_dir=cache_dir,
+            trust_remote_code=True,
+        )
+        self.mdl.to("cpu")
+        self.mdl.eval()
+        if getattr(self.tok, "pad_token_id", None) is None:
+            self.tok.pad_token = self.tok.eos_token
+        self._torch = torch
+        self.model_id = model_id
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self._timer = timer
+
+    def bind_timer(self, timer):
+        self._timer = timer
+        return self
+
+    def _encode_prompt(self, prompt: str) -> dict[str, Any]:
+        if hasattr(self.tok, "apply_chat_template"):
+            try:
+                return self.tok.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                )
+            except TypeError:
+                rendered = self.tok.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+                return self.tok(rendered, return_tensors="pt")
+        return self.tok(prompt, return_tensors="pt")
+
+    def generate(
+        self,
+        prompts: Sequence[str],
+        n: int = 1,
+        max_new_tokens: int | None = None,
+    ) -> List[List[str]]:
+        greedy = n == 1
+        max_tok = max_new_tokens or self.max_new_tokens
+        results: List[List[str]] = []
+
+        for prompt in list(prompts):
+            with optional_measure(getattr(self, "_timer", None), "TOKENIZE"):
+                inputs = self._encode_prompt(prompt)
+                inputs = {k: v.to("cpu") for k, v in inputs.items()}
+                prompt_tokens = int(inputs["input_ids"].shape[-1])
+
+            generate_kwargs: dict[str, Any] = {
+                **inputs,
+                "max_new_tokens": max_tok,
+                "num_return_sequences": n,
+                "do_sample": not greedy,
+                "pad_token_id": getattr(self.tok, "pad_token_id", None),
+            }
+            if not greedy:
+                generate_kwargs.update(
+                    {
+                        "temperature": self.temperature,
+                        "top_p": self.top_p,
+                        "top_k": self.top_k,
+                    }
+                )
+
+            with optional_measure(getattr(self, "_timer", None), "INFERENCE"):
+                with self._torch.no_grad():
+                    output_ids = self.mdl.generate(**generate_kwargs)
+
+            with optional_measure(getattr(self, "_timer", None), "DETOKENIZE"):
+                candidates = self.tok.batch_decode(
+                    output_ids[:, prompt_tokens:],
+                    skip_special_tokens=True,
+                )
+            results.append([candidate.strip() for candidate in candidates])
+
+        return results
+
+
 class _HFScorer:
     """Wraps a HF reward model with batched scoring."""
 

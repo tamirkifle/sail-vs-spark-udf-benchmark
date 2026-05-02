@@ -32,14 +32,14 @@ on the same data and same models, differing **only** in the runtime/UDF path.
 ## Run Modes
 
 Use one setup command and one run command. Every run prepares data, starts
-Sail/vLLM when needed, executes the matrix, aggregates results, and writes an
+Sail and/or vLLM when needed, executes the matrix, aggregates results, and writes an
 HTML report.
 
 | Mode | Config | Runs | Use when |
 | ---- | ------ | ---- | -------- |
 | `mock` | `config/mock.yaml` | Spark A/B only, synthetic prompts, all models mocked | First install check on macOS/Linux |
 | `cpu` | `config/cpu.yaml` | A/B/C/D, local Sail server, HF dataset, mock models on CPU | Laptop or CPU host benchmarking |
-| `cpu_real` | `config/cpu_real.yaml` | A/B/C/D, local Sail server, vLLM CPU generation, real scorer/embedder | Real-model CPU smoke benchmark |
+| `cpu_real` | `config/cpu_real.yaml` | A/B/C/D, local Sail server, Transformers CPU generation, real scorer/embedder | Real-model CPU smoke benchmark |
 | `gpu` | `config/gpu_h200.yaml` | A/B/C/D, local Sail server, vLLM generation | CUDA host / H200 benchmark |
 
 ## Quickstart
@@ -53,7 +53,7 @@ scripts/run_benchmark.sh --mode mock --venv .venv
 scripts/setup_env.sh --mode cpu --venv .venv
 scripts/run_benchmark.sh --mode cpu --venv .venv
 
-# 3) Real-model CPU smoke run. This starts Sail and vLLM CPU automatically.
+# 3) Real-model CPU smoke run. This starts Sail automatically; generation runs in-process with Transformers on CPU.
 scripts/setup_env.sh --mode cpu_real --venv .venv
 scripts/run_benchmark.sh --mode cpu_real --venv .venv
 
@@ -78,17 +78,16 @@ MODELS_DIR=/mnt/fast/models scripts/run_benchmark.sh --mode gpu --venv .venv_gpu
 
 `cpu_real` caveats:
 
-- vLLM CPU support depends on platform. Linux x86_64 is the most straightforward path and has pre-built CPU wheels.
-- Apple Silicon CPU vLLM is experimental and currently requires a source build. The mock `cpu` mode remains the portable macOS path.
-- Hosts with glibc older than 2.35 cannot install the pre-built vLLM CPU wheel. Use `VLLM_CPU_INSTALL=source scripts/setup_env.sh --mode cpu_real --venv .venv` on those machines.
+- `scripts/setup_env.sh --mode cpu_real` installs the standard CPU model stack: `torch`, `transformers`, `sentence-transformers`, and `accelerate`. It does not install vLLM.
+- `scripts/run_benchmark.sh --mode cpu_real` does not start vLLM by default. `config/cpu_real.yaml` sets `models.generator.provider: transformers`, so generation happens inside the Python worker process on CPU.
 - Real CPU generation is slow. Keep `config/cpu_real.yaml` small for smoke tests, or override `WORKLOADS`, `EXECUTIONS`, and `ITERATIONS` when iterating.
-- The runner starts CPU vLLM without GPU-only flags such as `--gpu-memory-utilization` or default FP8 quantization.
+- GPU pipeline continuity and vLLM scheduler metrics are reported as `N/A` when those telemetry sources are unavailable.
 
 ## Key technical constraints (from prior learnings)
 
-1. **Generation provider.** Real generation is served by vLLM. Mock and `cpu`
-   modes use deterministic mock generation so they run on any machine;
-   `cpu_real` starts vLLM in CPU mode for real generation.
+1. **Generation provider.** GPU real generation is served by vLLM. Mock and
+   `cpu` modes use deterministic mock generation so they run on any machine;
+   `cpu_real` uses in-process Hugging Face Transformers generation on CPU.
 2. **Lazy `torch` imports** inside UDF closures — PySpark cloudpickles every
    closure even under Sail (because it flows over Spark Connect gRPC).
 3. **Sail UDTF syntax.** Use `LATERAL fn(col1, col2)`, NOT
@@ -106,11 +105,13 @@ See `config/`, `src/sail_vs_spark/`, `scripts/`, `analysis/`, `tests/`.
   `DATA_TRANSFER_IN`, `MODEL_LOAD`, `TOKENIZE`, `INFERENCE`, `SCORE`,
   `DETOKENIZE`, `DATA_TRANSFER_OUT`.
 - **System telemetry** (one file per run under `runs/<run_id>/stats.json`):
-  wall-clock, CPU %, RSS, peak RAM, GPU util/mem, cumulative bytes written,
-  `nvidia-smi dmon` log.
+  wall-clock, process and process-tree CPU/RSS, peak RAM, optional GPU
+  util/mem, optional vLLM metrics, cumulative bytes written, `nvidia-smi dmon`
+  log when available.
 - **Derived report** (`report/aggregate_summary.json`):
   `serialization_tax_pct = (transfer_in + transfer_out)/wall`,
-  `pipeline_continuity = gpu_active_time / wall`.
+  `pipeline_continuity = gpu_active_samples / gpu_samples` when GPU telemetry
+  is available, otherwise `N/A`.
 
 ## Visualisations produced
 

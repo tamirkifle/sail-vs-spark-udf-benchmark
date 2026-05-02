@@ -1,56 +1,78 @@
-# ⛵ Sail vs 🎇 Spark: Explorer Cluster Guide
+# SLURM Runs
 
-This folder contains scripts for running benchmarks on the Northeastern Explorer cluster.
+These scripts are for cluster runs where login nodes may have internet but
+compute nodes often do not.
 
-## 1. Quick Start
+## CPU Real Mode
 
-### Step 1: Sync code to the cluster
-From your **local machine**, run:
+`cpu_real` uses in-process Hugging Face Transformers generation on CPU. It does
+not install or start vLLM.
+
+From the repo root on the cluster:
+
 ```bash
-./slurm/sync.sh push
-```
+module load anaconda3/2024.06 || true
+module load OpenJDK/22.0.2 || true
 
-### Step 2: Prepare the environment (Login Node)
-SSH into the cluster and run the prep script. This will download models, build Sail, and setup venvs while you still have internet access:
-```bash
-ssh explorer
-cd /scratch/yirga.t/sail_vs_spark_benchmark
-bash slurm/prep_download.sh
-bash slurm/prep_install.sh
-```
-
-### Step 3: Run Benchmarks (Compute Nodes)
-Now you can submit the jobs to the offline compute nodes:
-```bash
-# For laptop-scale CPU benchmarks (short partition)
-sbatch slurm/submit_cpu.sh
-
-# For CPU real-model benchmarks with managed CPU vLLM
+scripts/setup_env.sh --mode cpu_real --venv .venv
+mkdir -p logs
 sbatch slurm/submit_cpu_real_models.sh
-
-# For full-scale GPU benchmarks (H200)
-sbatch slurm/submit_gpu.sh
-
-# For a quick GPU verification (e.g. on V100)
-sbatch slurm/submit_gpu_smoke.sh
 ```
 
-### Step 4: Retrieve Results
-Once the jobs are finished, run this on your **local machine**:
+Spark requires Java 17 or newer. `submit_cpu_real_models.sh` prints the selected
+`java` path and `java -version`, then exits before running benchmarks if Java is
+too old.
+
+## Offline Compute Nodes
+
+By default, `submit_cpu_real_models.sh` sets `FORCE_SYNTHETIC=1` so dataset prep
+does not contact Hugging Face from a compute node.
+
+To run with real UltraFeedback prompts on an offline compute node, pre-stage the
+prepared parquet on a login node that has internet:
+
 ```bash
-./slurm/sync.sh pull
+module load anaconda3/2024.06 || true
+
+# Use the same venv/cache locations as the submit job.
+scripts/setup_env.sh --mode cpu_real --venv .venv
+export HF_HOME="$PWD/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export SENTENCE_TRANSFORMERS_HOME="$PWD/models"
+export MODELS_DIR="$PWD/models"
+
+# Download all non-mock cpu_real models, including the Transformers generator.
+.venv/bin/python scripts/download_models.py \
+  --config config/cpu_real.yaml \
+  --models-dir "$MODELS_DIR"
+
+# Download/prepare the dataset once and write data/cpu_real/prompts.parquet.
+.venv/bin/python scripts/prep_dataset.py --config config/cpu_real.yaml
 ```
 
-## 2. Script Details
+Then submit the compute job while reusing the staged parquet:
 
-- **`sync.sh`**: Handles `rsync` operations. It automatically excludes local virtual environments and previous results to keep the transfer fast.
-- **`submit_cpu.sh`**: Uses `.venv`, builds Sail v0.6.0, and runs the mock-model CPU benchmark matrix.
-- **`submit_cpu_real_models.sh`**: Uses `.venv`, starts Sail and CPU vLLM through `run_benchmark.sh --mode cpu_real`, and runs the real-model CPU smoke matrix.
-- **`submit_gpu.sh`**: Similar to CPU, but requests an H200 GPU and installs heavy AI dependencies (torch, vllm, etc.) before running.
-- **`submit_gpu_smoke.sh`**: A faster version that requests any GPU (e.g. V100) and runs a tiny 100-row benchmark using a 0.5B parameter model. Use this to verify that the CUDA code path and dependencies are correct without waiting for an H200.
+```bash
+SKIP_DATASET_PREP=1 sbatch slurm/submit_cpu_real_models.sh
+```
 
-## 3. Environment
-All scripts are configured to use:
-- **Project Scratch**: `/scratch/yirga.t/sail_vs_spark_benchmark`
-- **Local Model Cache**: `.cache/huggingface/` (within the project folder)
-- **Host Alias**: `explorer` (assumes you have this configured in your `~/.ssh/config`)
+`SKIP_DATASET_PREP=1` tells `scripts/run_benchmark.sh` not to delete and rebuild
+`data/cpu_real/prompts.parquet`. The job still uses the staged model/cache
+directories configured by the submit script:
+
+```text
+HF_HOME=$REPO_DIR/.cache/huggingface
+HF_HUB_CACHE=$REPO_DIR/.cache/huggingface/hub
+SENTENCE_TRANSFORMERS_HOME=$REPO_DIR/models
+MODELS_DIR=$REPO_DIR/models
+```
+
+If compute nodes also have internet and you want the job to perform dataset prep
+itself, submit with:
+
+```bash
+FORCE_SYNTHETIC=0 sbatch slurm/submit_cpu_real_models.sh
+```
+
+That path is not recommended for offline partitions because Hugging Face
+streaming can block for a long time before failing.

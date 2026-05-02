@@ -38,13 +38,20 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
             "avg_cpu_pct": 12.5,
             "peak_rss_mb": 321.0,
             "avg_rss_mb": 300.0,
+            "avg_process_tree_cpu_pct": 18.5,
+            "peak_process_tree_rss_mb": 640.0,
+            "avg_process_tree_rss_mb": 500.0,
+            "sampled_child_processes": 2,
             "peak_host_ram_gb": 7.5,
+            "gpu_telemetry_available": True,
             "avg_gpu_util_pct": 45.0,
             "peak_gpu_util_pct": 80.0,
             "avg_gpu_mem_util_pct": 35.0,
             "peak_gpu_mem_used_mb": 1024.0,
             "avg_gpu_power_w": 60.0,
+            "pipeline_continuity_available": True,
             "pipeline_continuity": 0.75,
+            "vllm_telemetry_available": True,
             "bytes_read_delta": 123,
             "bytes_written_delta": 4_000_000,
             "mb_written_delta": 4.0,
@@ -140,6 +147,11 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert run_row["UntracedInWindow_sec"] == 0.1
     assert run_row["PostTrace_sec"] == 1.05
     assert run_row["InferenceTime_sec"] == 0.25
+    assert run_row["AvgProcessTreeCPU_pct"] == 18.5
+    assert run_row["PeakProcessTreeRSS_MB"] == 640.0
+    assert run_row["SampledChildProcesses"] == 2
+    assert bool(run_row["GpuTelemetryAvailable"]) is True
+    assert bool(run_row["VllmTelemetryAvailable"]) is True
     assert run_row["UntracedEngineRuntime_sec"] == 0.25
     assert run_row["BoundaryTax_sec"] == 3.5
     assert run_row["MeasuredDiskWrite_MB"] == 4.0
@@ -230,9 +242,11 @@ def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -
     summary = aggregate_results.aggregate(str(results_dir))
 
     assert len(summary) == 1
+    assert summary.iloc[0]["Pipeline Continuity"] is None or aggregate_results.pd.isna(summary.iloc[0]["Pipeline Continuity"])
     assert (results_dir / "report" / "aggregate.html").exists()
     html = (results_dir / "report" / "aggregate.html").read_text()
     assert "No GPU/vLLM activity samples recorded" in html
+    assert "N/A" in html
     assert "Insufficient W0 depth sweep" in html
 
 

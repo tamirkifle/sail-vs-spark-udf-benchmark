@@ -43,21 +43,31 @@ def test_cpu_real_mode_is_wired_to_config() -> None:
 
     assert "mock|cpu|cpu_real|gpu" in runner
     assert 'cpu_real) DEFAULT_CONFIG="config/cpu_real.yaml"' in runner
-    assert '"$MODE" == "cpu_real"' in runner
+    assert 'START_VLLM="${START_VLLM:-$([[ "$MODE" == "gpu" ]] && echo 1 || echo 0)}"' in runner
     assert "mock|cpu|cpu_real|gpu|dev" in setup
 
 
-def test_cpu_real_config_uses_real_models_and_cpu_vllm() -> None:
+def test_cpu_real_config_uses_real_models_and_transformers_generator() -> None:
     cfg = yaml.safe_load(Path("config/cpu_real.yaml").read_text())
 
     assert cfg["profile"] == "cpu_real"
-    assert cfg["vllm"]["device"] == "cpu"
-    assert cfg["vllm"]["dtype"] == "bfloat16"
+    assert "vllm" not in cfg
     assert cfg["models"]["generator"]["name"] == "Qwen/Qwen2.5-0.5B-Instruct"
+    assert cfg["models"]["generator"]["provider"] == "transformers"
+    assert "server_url" not in cfg["models"]["generator"]
     assert cfg["models"]["embedder"]["name"] == "sentence-transformers/all-MiniLM-L6-v2"
     for model_cfg in cfg["models"].values():
         assert model_cfg["prefer_mock"] is False
         assert model_cfg["allow_mock"] is False
+
+
+def test_cpu_real_setup_avoids_vllm_install_path() -> None:
+    setup = Path("scripts/setup_env.sh").read_text()
+    cpu_real_block = setup.split('if [[ "$MODE" == "cpu_real" ]]; then', 1)[1]
+    cpu_real_block = cpu_real_block.split('elif [[ "$MODE" == "cpu" || "$MODE" == "gpu" ]]; then', 1)[0]
+
+    assert "transformers sentence-transformers accelerate" in cpu_real_block
+    assert "vllm" not in cpu_real_block.lower()
 
 
 def test_cpu_vllm_startup_omits_gpu_only_args() -> None:

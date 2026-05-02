@@ -1,5 +1,5 @@
-# CPU real-model smoke config. Starts vLLM in CPU mode for generation and
-# uses local HF/SentenceTransformer model loading for scoring/embedding.
+# CPU real-model smoke config. Uses in-process Transformers CPU generation
+# plus local HF/SentenceTransformer model loading for scoring/embedding.
 
 profile: cpu_real
 hardware:
@@ -18,13 +18,13 @@ dataset:
 models:
   generator:
     name: Qwen/Qwen2.5-0.5B-Instruct
+    provider: transformers
     prefer_mock: false
     allow_mock: false
     max_new_tokens: 16
     temperature: 0.7
     top_k: 50
     top_p: 0.9
-    server_url: ""
   scorer:
     name: OpenAssistant/reward-model-deberta-v3-large-v2
     prefer_mock: false
@@ -37,16 +37,6 @@ models:
     prefer_mock: false
     allow_mock: false
     device: cpu
-
-vllm:
-  device: cpu
-  host: "127.0.0.1"
-  port: 8000
-  dtype: bfloat16
-  tensor_parallel_size: 1
-  max_model_len: 512
-  cpu_kvcache_space: 4
-  cpu_num_reserved: 1
 
 workloads:
   w0_chained:

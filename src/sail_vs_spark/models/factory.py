@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .adapters import _HFScorer, _STEmbedder, _VLLMGenerator
+from .adapters import _HFGenerator, _HFScorer, _STEmbedder, _VLLMGenerator
 from .device import hf_available, resolve_device, torch_available
 from .mock import MockEmbedder, MockGenerator, MockScorer
 
@@ -27,6 +27,7 @@ def get_generator(cfg: dict, timer: Any | None = None) -> Any:
 
     prefer_mock = cfg.get("prefer_mock", False)
     allow_mock = cfg.get("allow_mock", True)
+    provider = str(cfg.get("provider", "") or "").strip().lower()
 
     server_url = cfg.get("server_url") or os.environ.get("VLLM_BASE_URL", "")
     if not prefer_mock and server_url:
@@ -59,9 +60,40 @@ def get_generator(cfg: dict, timer: Any | None = None) -> Any:
                 raise
             print(f"[loaders] vLLM Generator fell back ({exc})")
 
+    if not prefer_mock and provider in {"transformers", "hf", "huggingface"}:
+        try:
+            if timer is not None:
+                with timer.measure("MODEL_LOAD"):
+                    _GENERATOR = _HFGenerator(
+                        model_id=cfg["name"],
+                        max_new_tokens=cfg.get("max_new_tokens", 128),
+                        temperature=cfg.get("temperature", 0.7),
+                        top_p=cfg.get("top_p", 0.9),
+                        top_k=cfg.get("top_k", 50),
+                        timer=timer,
+                    )
+            else:
+                _GENERATOR = _HFGenerator(
+                    model_id=cfg["name"],
+                    max_new_tokens=cfg.get("max_new_tokens", 128),
+                    temperature=cfg.get("temperature", 0.7),
+                    top_p=cfg.get("top_p", 0.9),
+                    top_k=cfg.get("top_k", 50),
+                    timer=timer,
+                )
+            print("[loaders] Using Transformers CPU generator")
+            return _bind_timer(_GENERATOR, timer)
+        except Exception as exc:
+            if not allow_mock:
+                raise RuntimeError(
+                    f"Transformers generator failed to load model {cfg.get('name')!r}: {exc}"
+                ) from exc
+            print(f"[loaders] Transformers Generator fell back ({exc})")
+
     if not allow_mock and not prefer_mock:
         raise RuntimeError(
-            "real generation requires a vLLM server_url or VLLM_BASE_URL; "
+            "real generation requires a vLLM server_url/VLLM_BASE_URL "
+            "or provider=transformers; "
             "set prefer_mock=true for local smoke runs"
         )
 

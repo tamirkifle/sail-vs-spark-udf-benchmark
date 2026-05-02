@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
-from sail_vs_spark.models.adapters import _HFScorer, _VLLMGenerator
+import pytest
+
+from sail_vs_spark.models.adapters import _HFGenerator, _HFScorer, _VLLMGenerator
 from sail_vs_spark.models.loaders import (
     get_embedder, get_generator, get_scorer, reset_singletons,
 )
@@ -82,13 +84,56 @@ def test_get_generator_uses_vllm_url(monkeypatch):
     assert gen.server_url == "http://127.0.0.1:8000"
 
 
-def test_get_generator_requires_vllm_when_mock_disabled(monkeypatch):
+def test_get_generator_uses_transformers_provider(monkeypatch):
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
+    class _FakeHFGenerator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def bind_timer(self, timer):
+            self.timer = timer
+            return self
+
+    monkeypatch.setattr("sail_vs_spark.models.factory._HFGenerator", _FakeHFGenerator)
+    gen = get_generator(
+        {
+            "name": "local-model",
+            "provider": "transformers",
+            "allow_mock": False,
+            "max_new_tokens": 12,
+        }
+    )
+    assert isinstance(gen, _FakeHFGenerator)
+    assert gen.kwargs["model_id"] == "local-model"
+    assert gen.kwargs["max_new_tokens"] == 12
+
+
+def test_get_generator_transformers_failure_is_clear(monkeypatch):
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
+    class _BrokenHFGenerator:
+        def __init__(self, **kwargs):
+            raise OSError("missing weights")
+
+    monkeypatch.setattr("sail_vs_spark.models.factory._HFGenerator", _BrokenHFGenerator)
+    with pytest.raises(RuntimeError, match="Transformers generator failed to load"):
+        get_generator(
+            {
+                "name": "local-model",
+                "provider": "transformers",
+                "allow_mock": False,
+            }
+        )
+
+
+def test_get_generator_requires_real_backend_when_mock_disabled(monkeypatch):
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
     try:
         get_generator({"name": "served-model", "allow_mock": False})
         raise AssertionError("expected RuntimeError")
     except RuntimeError as exc:
-        assert "vLLM" in str(exc)
+        assert "provider=transformers" in str(exc)
 
 
 def test_get_scorer_singleton():
@@ -177,6 +222,82 @@ def test_hf_scorer_micro_batches_inputs():
     ]
     assert scorer.mdl.calls == [4, 4, 2]
     assert out == [0, 1, 2, 3, 10, 11, 12, 13, 20, 21]
+
+
+def test_hf_generator_uses_cpu_generate_and_decodes_new_tokens():
+    class _FakeTensor:
+        def __init__(self, values):
+            self.values = values
+
+        @property
+        def shape(self):
+            return (len(self.values), len(self.values[0]))
+
+        def to(self, device):
+            return self
+
+        def __getitem__(self, item):
+            rows, cols = item
+            selected = self.values[rows] if isinstance(rows, int) else self.values[rows]
+            if rows == slice(None):
+                selected = self.values
+            return _FakeTensor([row[cols] for row in selected])
+
+    class _FakeTok:
+        pad_token_id = None
+        eos_token = "<eos>"
+
+        def __init__(self):
+            self.pad_token = None
+
+        def __call__(self, text, return_tensors="pt"):
+            return {"input_ids": _FakeTensor([[1, 2, 3]])}
+
+        def batch_decode(self, output_ids, skip_special_tokens=True):
+            return [" decoded " for _ in output_ids.values]
+
+    class _FakeModel:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            n = kwargs["num_return_sequences"]
+            return _FakeTensor([[1, 2, 3, 9, 8] for _ in range(n)])
+
+    class _FakeNoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeTorch:
+        def no_grad(self):
+            return _FakeNoGrad()
+
+    gen = object.__new__(_HFGenerator)
+    gen.tok = _FakeTok()
+    gen.mdl = _FakeModel()
+    gen._torch = _FakeTorch()
+    gen.model_id = "fake"
+    gen.max_new_tokens = 5
+    gen.temperature = 0.7
+    gen.top_p = 0.9
+    gen.top_k = 50
+    gen._timer = BoundaryTimer("hf-generator")
+
+    out = gen.generate(["hello"], n=2, max_new_tokens=4)
+
+    assert out == [["decoded", "decoded"]]
+    call = gen.mdl.calls[0]
+    assert call["num_return_sequences"] == 2
+    assert call["max_new_tokens"] == 4
+    assert call["do_sample"] is True
+    report = gen._timer.report()
+    assert report["phases"]["TOKENIZE"]["call_count"] == 1
+    assert report["phases"]["INFERENCE"]["call_count"] == 1
+    assert report["phases"]["DETOKENIZE"]["call_count"] == 1
 
 
 def test_get_embedder_falls_back_to_mock():
