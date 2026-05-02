@@ -186,7 +186,7 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert "vllm_gpu_cache_usage_pct" in html
     assert "gpu_util_pct" in html
     assert "Boundary Amplification: W0 Depth Scaling" in html
-    assert "Disk Materialization &amp; IO" in html
+    assert "Disk Telemetry &amp; Output Footprint" in html
     assert "Memory Comparison" in html
     assert "Relative Speedups" in html
     assert "Spark's batched path" in html
@@ -204,7 +204,7 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert 'startup: "#7ea6d8"' in html
     assert 'activeGap: "#d38c6a"' in html
     assert 'tail: "#a993cf"' in html
-    assert "Pattern-filled bars indicate fallback output-footprint values" in html
+    assert "Pattern-filled bars are not telemetry" in html
     assert "disk_io.png" not in html
     assert "gpu_timeline.png" not in html
     assert "depth_runtime.png" not in html

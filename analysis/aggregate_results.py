@@ -953,7 +953,7 @@ def _build_tel_cards(rows: pd.DataFrame) -> tuple[list[dict], dict]:
                 c["DiskDisplayLabel"] = (
                     "Runtime writes"
                     if c.get("Disk Metric Kind") == "runtime_writes"
-                    else "Output bytes"
+                    else "Output footprint"
                 )
         cards.append({"workload": workload, "configs": cfgs})
     return cards, tel_maxes
@@ -2338,13 +2338,13 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
     subtitle = (
         "Measured runtime writes are available for __COVERAGE__ / __TOTAL__ runs. This D3 view compares true process-level write deltas where telemetry exists, and still shows final output materialization footprint for context."
         if chart_data.get("metricKind") == "runtime_writes"
-        else "Measured runtime write telemetry was unavailable for this run set, so the chart falls back to final output materialization footprint. This is useful for comparing artifact size, not for claiming observed spill or runtime disk pressure."
+        else "Measured runtime write telemetry was unavailable or zero for this run set, so the chart shows final output materialization footprint instead. This is artifact-size context, not observed spill or runtime disk pressure."
     )
     return """
 <div class="card disk-card">
-  <h2>Disk Materialization &amp; IO</h2>
+  <h2>Disk Telemetry &amp; Output Footprint</h2>
   <p class="section-note">__SUBTITLE__</p>
-  <p class="section-note">Tooltips always separate measured runtime writes from output bytes and show provenance. Pattern-filled bars indicate fallback output-footprint values rather than observed runtime write telemetry.</p>
+  <p class="section-note">Tooltips always separate measured runtime writes from output footprint and show provenance. Pattern-filled bars are not telemetry; they are fallback artifact-footprint values shown only so tiny completed runs do not look like missing data.</p>
   <div class="disk-legend">
     <div class="disk-legend-group">
       <span class="disk-legend-title">Execution configs</span>
@@ -2354,7 +2354,7 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
       <span class="disk-legend-title">Provenance</span>
       <div class="disk-config-grid">
         <span class="disk-config-pill"><span class="disk-swatch disk-solid"></span>Measured runtime writes</span>
-        <span class="disk-config-pill"><span class="disk-swatch disk-pattern"></span>Fallback output materialization</span>
+        <span class="disk-config-pill"><span class="disk-swatch disk-pattern"></span>Output footprint fallback</span>
       </div>
     </div>
   </div>
@@ -3292,7 +3292,7 @@ def _write_html(
   </div>
   <div class="card">
     <h2>Runtime Telemetry</h2>
-      <p class="section-note">Aggregated telemetry from the runtime collector. Surfaces secondary cost signals — GPU pipeline continuity, peak memory pressure, and disk footprint — that are not captured in wall-clock timing alone. The disk column uses measured runtime writes when available, otherwise final output bytes. Bold values indicate the best result for that metric within each workload.</p>
+      <p class="section-note">Aggregated telemetry from the runtime collector. Surfaces secondary cost signals — GPU pipeline continuity, peak memory pressure, and measured runtime writes — that are not captured in wall-clock timing alone. When disk-write telemetry is unavailable or zero, the disk cell is labeled Output footprint and should be read as artifact-size context rather than telemetry. Bold values indicate the best result for that metric within each workload.</p>
     <div class="tel-grid">
       {% for card in tel_cards %}
       <div class="tel-card">
