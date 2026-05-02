@@ -39,6 +39,7 @@ HTML report.
 | ---- | ------ | ---- | -------- |
 | `mock` | `config/mock.yaml` | Spark A/B only, synthetic prompts, all models mocked | First install check on macOS/Linux |
 | `cpu` | `config/cpu.yaml` | A/B/C/D, local Sail server, HF dataset, mock models on CPU | Laptop or CPU host benchmarking |
+| `cpu_real` | `config/cpu_real.yaml` | A/B/C/D, local Sail server, vLLM CPU generation, real scorer/embedder | Real-model CPU smoke benchmark |
 | `gpu` | `config/gpu_h200.yaml` | A/B/C/D, local Sail server, vLLM generation | CUDA host / H200 benchmark |
 
 ## Quickstart
@@ -52,7 +53,11 @@ scripts/run_benchmark.sh --mode mock --venv .venv
 scripts/setup_env.sh --mode cpu --venv .venv
 scripts/run_benchmark.sh --mode cpu --venv .venv
 
-# 3) GPU run. This starts Sail and vLLM automatically.
+# 3) Real-model CPU smoke run. This starts Sail and vLLM CPU automatically.
+scripts/setup_env.sh --mode cpu_real --venv .venv
+scripts/run_benchmark.sh --mode cpu_real --venv .venv
+
+# 4) GPU run. This starts Sail and vLLM automatically.
 scripts/setup_env.sh --mode gpu --venv .venv_gpu
 scripts/run_benchmark.sh --mode gpu --venv .venv_gpu
 ```
@@ -71,10 +76,19 @@ CONFIG=config/gpu_v100_smoke.yaml scripts/run_benchmark.sh --mode gpu --venv .ve
 MODELS_DIR=/mnt/fast/models scripts/run_benchmark.sh --mode gpu --venv .venv_gpu
 ```
 
+`cpu_real` caveats:
+
+- vLLM CPU support depends on platform. Linux x86_64 is the most straightforward path and has pre-built CPU wheels.
+- Apple Silicon CPU vLLM is experimental and currently requires a source build. The mock `cpu` mode remains the portable macOS path.
+- Hosts with glibc older than 2.35 cannot install the pre-built vLLM CPU wheel. Use `VLLM_CPU_INSTALL=source scripts/setup_env.sh --mode cpu_real --venv .venv` on those machines.
+- Real CPU generation is slow. Keep `config/cpu_real.yaml` small for smoke tests, or override `WORKLOADS`, `EXECUTIONS`, and `ITERATIONS` when iterating.
+- The runner starts CPU vLLM without GPU-only flags such as `--gpu-memory-utilization` or default FP8 quantization.
+
 ## Key technical constraints (from prior learnings)
 
-1. **Generation provider.** Real generation is served by vLLM. Mock and CPU
-   modes use deterministic mock generation so they run on any machine.
+1. **Generation provider.** Real generation is served by vLLM. Mock and `cpu`
+   modes use deterministic mock generation so they run on any machine;
+   `cpu_real` starts vLLM in CPU mode for real generation.
 2. **Lazy `torch` imports** inside UDF closures — PySpark cloudpickles every
    closure even under Sail (because it flows over Spark Connect gRPC).
 3. **Sail UDTF syntax.** Use `LATERAL fn(col1, col2)`, NOT

@@ -19,7 +19,7 @@ export RUSTUP_HOME="/scratch/yirga.t/.rustup"
 # Pin cargo/rustc to the controlled rustup installation before module loads.
 export PATH="$CARGO_HOME/bin:$PATH"
 
-# Load same module as prep_node
+# Load the same modules used during prep.
 module purge
 module load anaconda3/2024.06 || true
 module load cuda/12.8.0 || true

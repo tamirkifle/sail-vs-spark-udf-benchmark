@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Unified benchmark runner for mock, CPU/macOS, and GPU/Linux runs.
+# Unified benchmark runner for mock, CPU/macOS, CPU vLLM, and GPU/Linux runs.
 
 set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/run_benchmark.sh [--mode mock|cpu|gpu] [--config path] [--venv path]
+Usage: scripts/run_benchmark.sh [--mode mock|cpu|cpu_real|gpu] [--config path] [--venv path]
 
 Common overrides:
   MODELS_DIR=...         HF/Transformers cache. Default: ./models
@@ -16,7 +16,7 @@ Common overrides:
   W0_DEPTHS="1 2 3"      W0 depths. Default comes from config.
   FORCE_SYNTHETIC=1      Force synthetic prompts. Default for mock mode.
   START_SAIL=0|1         Override auto Sail server startup for C/D.
-  START_VLLM=0|1         Override auto vLLM startup for gpu mode.
+  START_VLLM=0|1         Override auto vLLM startup for gpu/cpu_real modes.
 USAGE
 }
 
@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$MODE" in
-  mock|cpu|gpu) ;;
+  mock|cpu|cpu_real|gpu) ;;
   *)
     echo "invalid mode: $MODE" >&2
     usage >&2
@@ -65,6 +65,7 @@ cd "$REPO_DIR"
 case "$MODE" in
   mock) DEFAULT_CONFIG="config/mock.yaml" ;;
   cpu) DEFAULT_CONFIG="config/cpu.yaml" ;;
+  cpu_real) DEFAULT_CONFIG="config/cpu_real.yaml" ;;
   gpu) DEFAULT_CONFIG="config/gpu_h200.yaml" ;;
 esac
 CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
@@ -104,7 +105,7 @@ WORKLOADS="${WORKLOADS:-w0 w1 w2 w3 w4}"
 EXECUTIONS="${EXECUTIONS:-$(yaml_expr "cfg.get('execution', {}).get('configs', ['A', 'B'])" "A B")}"
 W0_DEPTHS="${W0_DEPTHS:-$(yaml_expr "cfg.get('workloads', {}).get('w0_chained', {}).get('depths', [1])" "1")}"
 FORCE_SYNTHETIC="${FORCE_SYNTHETIC:-$([[ "$MODE" == "mock" ]] && echo 1 || echo 0)}"
-START_VLLM="${START_VLLM:-$([[ "$MODE" == "gpu" ]] && echo 1 || echo 0)}"
+START_VLLM="${START_VLLM:-$([[ "$MODE" == "gpu" || "$MODE" == "cpu_real" ]] && echo 1 || echo 0)}"
 
 MODELS_DIR="${MODELS_DIR:-$REPO_DIR/models}"
 export HF_HOME="${HF_HOME:-$MODELS_DIR}"
@@ -182,12 +183,16 @@ if [[ "$START_VLLM" == "1" ]]; then
   export VLLM_MODEL="${VLLM_MODEL:-$(yaml_expr "cfg['models']['generator']['name']" "")}"
   export VLLM_HOST="${VLLM_HOST:-$(_vllm host "127.0.0.1")}"
   export VLLM_PORT="${VLLM_PORT:-$(_vllm port "8000")}"
+  export VLLM_DEVICE="${VLLM_DEVICE:-$(_vllm device "gpu")}"
+  export VLLM_DTYPE="${VLLM_DTYPE:-$(_vllm dtype "")}"
   export VLLM_TP="${VLLM_TP:-$(_vllm tensor_parallel_size "1")}"
   export VLLM_GPU_MEM="${VLLM_GPU_MEM:-$(_vllm gpu_memory_utilization "0.90")}"
   export VLLM_MAX_LEN="${VLLM_MAX_LEN:-$(_vllm max_model_len "8192")}"
   export VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-$(_vllm quantization "fp8")}"
   export VLLM_TOKENIZER="${VLLM_TOKENIZER:-$(_vllm tokenizer "")}"
-  echo "[run] starting vLLM: model=$VLLM_MODEL url=http://$VLLM_HOST:$VLLM_PORT"
+  export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE:-$(_vllm cpu_kvcache_space "")}"
+  export VLLM_CPU_NUM_OF_RESERVED_CPU="${VLLM_CPU_NUM_OF_RESERVED_CPU:-$(_vllm cpu_num_reserved "")}"
+  echo "[run] starting vLLM: device=$VLLM_DEVICE model=$VLLM_MODEL url=http://$VLLM_HOST:$VLLM_PORT"
   source scripts/start_vllm_server.sh
 fi
 

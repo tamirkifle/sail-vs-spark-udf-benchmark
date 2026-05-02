@@ -66,5 +66,5 @@ fi
 
 echo "=========================================================="
 echo "✅ DOWNLOAD COMPLETE"
-echo "Now run: srun --partition=gpu ... explorer/prep_install.sh"
+echo "Now run: srun --partition=gpu ... slurm/prep_install.sh"
 echo "=========================================================="

@@ -4,16 +4,27 @@
 #
 # Usage in run_benchmark.sh:
 #   export VLLM_MODEL="Qwen/Qwen3.5-122B-A10B-FP8"
+#   export VLLM_DEVICE="gpu"
 #   source scripts/start_vllm_server.sh
 
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_PORT="${VLLM_PORT:-8000}"
+VLLM_DEVICE="${VLLM_DEVICE:-gpu}"
 export VLLM_BASE_URL="http://${VLLM_HOST}:${VLLM_PORT}"
 
-# Default to the bundled Qwen3 template. FP8-quantized Qwen3 models are often
-# uploaded without copying the chat_template from the base tokenizer_config.json.
-# transformers 4.44+ forbids the implicit default, so we must supply one explicitly.
-VLLM_CHAT_TEMPLATE="${VLLM_CHAT_TEMPLATE:-${REPO_DIR}/config/qwen3_chat_template.jinja}"
+if [[ "$VLLM_DEVICE" != "cpu" && "$VLLM_DEVICE" != "gpu" ]]; then
+    echo "[vllm] ERROR: VLLM_DEVICE must be cpu or gpu, got '${VLLM_DEVICE}'" >&2
+    exit 2
+fi
+
+if [[ "$VLLM_DEVICE" == "gpu" ]]; then
+    # Default to the bundled Qwen3 template. FP8-quantized Qwen3 models are often
+    # uploaded without copying the chat_template from the base tokenizer_config.json.
+    # transformers 4.44+ forbids the implicit default, so we must supply one explicitly.
+    VLLM_CHAT_TEMPLATE="${VLLM_CHAT_TEMPLATE:-${REPO_DIR}/config/qwen3_chat_template.jinja}"
+else
+    VLLM_CHAT_TEMPLATE="${VLLM_CHAT_TEMPLATE:-}"
+fi
 
 # Some FP8-quantized third-party uploads include broken or missing tokenizer
 # files. Set VLLM_TOKENIZER to a donor model (any Qwen3 with tokenizer.json)
@@ -41,16 +52,22 @@ else
     _VLLM_MODEL_PATH="${VLLM_MODEL}"
 fi
 
-# Ensure the venv bin is in PATH so FlashInfer's JIT subprocess can find ninja.
-export PATH="${REPO_DIR}/.venv_gpu/bin:${PATH}"
+# Ensure the active venv bin is in PATH so subprocesses can find installed tools.
+export PATH="$(dirname "$PY"):${REPO_DIR}/.venv_gpu/bin:${PATH}"
 
-echo "[vllm] starting server: ${VLLM_MODEL} on ${VLLM_BASE_URL}"
+echo "[vllm] starting ${VLLM_DEVICE} server: ${VLLM_MODEL} on ${VLLM_BASE_URL}"
 _TOKENIZER_ARG=()
 if [ -n "${VLLM_TOKENIZER}" ]; then
     echo "[vllm] using external tokenizer: ${VLLM_TOKENIZER}"
     _TOKENIZER_ARG=(--tokenizer "${VLLM_TOKENIZER}")
 fi
-"$PY" -m vllm.entrypoints.openai.api_server \
+
+_CHAT_TEMPLATE_ARG=()
+if [ -n "${VLLM_CHAT_TEMPLATE}" ]; then
+    _CHAT_TEMPLATE_ARG=(--chat-template "${VLLM_CHAT_TEMPLATE}")
+fi
+
+_VLLM_ARGS=(
     --model "${_VLLM_MODEL_PATH}" \
     --served-model-name "${VLLM_MODEL}" \
     "${_TOKENIZER_ARG[@]}" \
@@ -60,8 +77,33 @@ fi
     --gpu-memory-utilization "${VLLM_GPU_MEM:-0.90}" \
     --max-model-len "${VLLM_MAX_LEN:-8192}" \
     --quantization "${VLLM_QUANTIZATION:-fp8}" \
-    --chat-template "${VLLM_CHAT_TEMPLATE}" \
+    "${_CHAT_TEMPLATE_ARG[@]}" \
     --limit-mm-per-prompt '{"image": 0}' \
+)
+
+if [[ "$VLLM_DEVICE" == "cpu" ]]; then
+    _VLLM_ARGS=(
+        --model "${_VLLM_MODEL_PATH}"
+        --served-model-name "${VLLM_MODEL}"
+        "${_TOKENIZER_ARG[@]}"
+        --host "${VLLM_HOST}"
+        --port "${VLLM_PORT}"
+        --device cpu
+        --tensor-parallel-size "${VLLM_TP:-1}"
+        --dtype "${VLLM_DTYPE:-bfloat16}"
+        --max-model-len "${VLLM_MAX_LEN:-8192}"
+        "${_CHAT_TEMPLATE_ARG[@]}"
+        --limit-mm-per-prompt '{"image": 0}'
+    )
+    if [ -n "${VLLM_CPU_KVCACHE_SPACE:-}" ]; then
+        export VLLM_CPU_KVCACHE_SPACE
+    fi
+    if [ -n "${VLLM_CPU_NUM_OF_RESERVED_CPU:-}" ]; then
+        export VLLM_CPU_NUM_OF_RESERVED_CPU
+    fi
+fi
+
+"$PY" -m vllm.entrypoints.openai.api_server "${_VLLM_ARGS[@]}" \
     > "$RESULTS_DIR/vllm_server.log" 2>&1 &
 VLLM_PID=$!
 export VLLM_PID

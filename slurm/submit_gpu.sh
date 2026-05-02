@@ -9,7 +9,7 @@
 #SBATCH --error=logs/bench_gpu_%j.err
 
 # GPU benchmark for Sail vs Spark on NEU Explorer (H200).
-# NOTE: Run explorer/prep_node.sh on login node before submitting.
+# NOTE: Run slurm/prep_download.sh and slurm/prep_install.sh before submitting.
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ export PYTHONNOUSERSITE=1
 export CARGO_HOME="/scratch/yirga.t/.cargo"
 export RUSTUP_HOME="/scratch/yirga.t/.rustup"
 
-# Load same module as prep_node
+# Load the same modules used during prep.
 module purge
 module load anaconda3/2024.06 || true
 module load cuda/12.8.0 || true
@@ -34,7 +34,7 @@ export HF_DATASETS_OFFLINE=1
 
 # Ensure venv exists
 if [ ! -d "$VENV" ]; then
-    echo "Error: Venv $VENV not found. Run explorer/prep_node.sh on login node."
+    echo "Error: Venv $VENV not found. Run slurm/prep_download.sh and slurm/prep_install.sh first."
     exit 1
 fi
 

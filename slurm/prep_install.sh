@@ -23,7 +23,7 @@ REPO_DIR="$(pwd)"
 OFFLINE_DIR="$REPO_DIR/offline_pkgs"
 
 if [ ! -d "$OFFLINE_DIR" ]; then
-    echo "Error: $OFFLINE_DIR not found. Run explorer/prep_download.sh on login node first."
+    echo "Error: $OFFLINE_DIR not found. Run slurm/prep_download.sh on login node first."
     exit 1
 fi
 

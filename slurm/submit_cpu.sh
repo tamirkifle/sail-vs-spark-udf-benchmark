@@ -8,7 +8,7 @@
 #SBATCH --error=logs/bench_cpu_%j.err
 
 # Laptop-scale (CPU) benchmark for Sail vs Spark on NEU Explorer.
-# NOTE: Run explorer/prep_node.sh on login node before submitting.
+# NOTE: Run slurm/prep_download.sh and slurm/prep_install.sh before submitting.
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ export RUSTUP_HOME="/scratch/yirga.t/.rustup"
 # Must come before module loads so the module-provided rust never shadows it.
 export PATH="$CARGO_HOME/bin:$PATH"
 
-# Load same module as prep_node
+# Load the same modules used during prep.
 module purge
 module load anaconda3/2024.06 || true
 module load OpenJDK/22.0.2 || true
@@ -34,7 +34,7 @@ export VENV="$REPO_DIR/.venv"
 
 # Ensure venv exists
 if [ ! -d "$VENV" ]; then
-    echo "Error: Venv $VENV not found. Run explorer/prep_node.sh on login node."
+    echo "Error: Venv $VENV not found. Run slurm/prep_download.sh and slurm/prep_install.sh first."
     exit 1
 fi
 
