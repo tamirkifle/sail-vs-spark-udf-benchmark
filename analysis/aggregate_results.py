@@ -92,9 +92,7 @@ TRACE_COMPUTE_PHASES = {
     "OTHER",
 }
 
-PLOT_SCRIPTS = [
-    ("analysis/plot_depth_runtime.py", "depth_runtime.png"),
-]
+PLOT_SCRIPTS: list[tuple[str, str]] = []
 
 SAIL_SVG = """
 <svg width="28" height="28" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -1862,6 +1860,322 @@ def _build_gpu_utilization_section(chart_data: dict[str, Any]) -> str:
 """.replace("__PAYLOAD__", payload_json)
 
 
+def _build_depth_runtime_payload(run_df: pd.DataFrame) -> dict[str, Any]:
+    configs = ["A", "B", "C", "D"]
+    empty = {
+        "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+        "depths": [],
+        "series": [],
+        "summaries": [],
+        "hasEnoughDepths": False,
+        "maxRuntimeSec": 0.0,
+    }
+    if run_df.empty:
+        return empty
+
+    rows = run_df[run_df["Workload"] == "W0"].copy()
+    rows = rows[rows["Depth"].notna()]
+    if rows.empty:
+        return empty
+
+    rows["Depth"] = rows["Depth"].astype(int)
+    depths = sorted(int(d) for d in rows["Depth"].unique())
+    agg_rows: list[dict[str, Any]] = []
+    for (config, depth), group in rows.groupby(["Config", "Depth"], dropna=False):
+        cold_group = group[group["SampleIdx"] == 1]
+        warm_group = group[group["SampleIdx"] != 1]
+        cold_sec = (
+            float(cold_group["WallTime"].mean())
+            if not cold_group.empty
+            else float(group["WallTime"].mean())
+        )
+        warm_sec = (
+            float(warm_group["WallTime"].mean())
+            if not warm_group.empty
+            else float(group["WallTime"].mean())
+        )
+        rows_count = float(group["Rows"].mean()) if "Rows" in group else 0.0
+        rows_per_sec = rows_count / warm_sec if warm_sec > 0 else 0.0
+        agg_rows.append(
+            {
+                "config": str(config),
+                "label": get_label(str(config)),
+                "depth": int(depth),
+                "cold_sec": round(cold_sec, 6),
+                "warm_sec": round(warm_sec, 6),
+                "rows_per_sec": round(rows_per_sec, 3),
+                "boundary_tax_pct": round(float(group["BoundaryTax_pct"].mean()), 3),
+                "samples": int(len(group)),
+                "has_warm": bool(not warm_group.empty),
+            }
+        )
+
+    baseline_by_depth = {
+        row["depth"]: row["warm_sec"]
+        for row in agg_rows
+        if row["config"] == "B" and row["warm_sec"] > 0
+    }
+    max_runtime = 0.0
+    for row in agg_rows:
+        baseline = baseline_by_depth.get(row["depth"])
+        row["speedup_vs_b"] = (
+            round(baseline / row["warm_sec"], 3)
+            if baseline and row["warm_sec"] > 0
+            else None
+        )
+        max_runtime = max(max_runtime, row["cold_sec"], row["warm_sec"])
+
+    series = []
+    summaries = []
+    for cfg in configs:
+        points = sorted(
+            [row for row in agg_rows if row["config"] == cfg],
+            key=lambda row: row["depth"],
+        )
+        if not points:
+            continue
+
+        def slope(metric: str) -> float | None:
+            valid = [p for p in points if p.get(metric) is not None]
+            if len(valid) < 2:
+                return None
+            first, last = valid[0], valid[-1]
+            depth_delta = last["depth"] - first["depth"]
+            if depth_delta == 0:
+                return None
+            return round((float(last[metric]) - float(first[metric])) / depth_delta, 6)
+
+        warm_slope = slope("warm_sec")
+        cold_slope = slope("cold_sec")
+        summaries.append(
+            {
+                "config": cfg,
+                "label": get_label(cfg),
+                "warm_slope_sec_per_depth": warm_slope,
+                "cold_slope_sec_per_depth": cold_slope,
+                "depth_count": len({p["depth"] for p in points}),
+                "depth3_warm_sec": next(
+                    (p["warm_sec"] for p in points if p["depth"] == 3),
+                    None,
+                ),
+            }
+        )
+        series.append({"config": cfg, "label": get_label(cfg), "points": points})
+
+    return {
+        "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+        "depths": depths,
+        "series": series,
+        "summaries": summaries,
+        "hasEnoughDepths": len(depths) >= 2,
+        "maxRuntimeSec": round(max_runtime, 6),
+    }
+
+
+def _build_depth_runtime_section(chart_data: dict[str, Any]) -> str:
+    payload_json = json.dumps(chart_data, ensure_ascii=True).replace("</", "<\\/")
+    return """
+<div class="card depth-card">
+  <h2>Boundary Amplification: W0 Depth Scaling</h2>
+  <p class="section-note">W0 is intentionally trivial. Any runtime growth with depth is mostly orchestration and engine–Python boundary-crossing cost, not model compute. This section shows whether repeated UDF stages amplify that tax.</p>
+  <script type="application/json" id="depth-runtime-data">__PAYLOAD__</script>
+  <div class="depth-controls">
+    <label>Runtime view
+      <select id="depth-runtime-mode">
+        <option value="warm_sec" selected>Warm steady-state</option>
+        <option value="cold_sec">Cold first run</option>
+      </select>
+    </label>
+  </div>
+  <div id="depth-runtime-chart" class="depth-chart-shell"></div>
+  <div id="depth-summary-cards" class="depth-summary-grid"></div>
+</div>
+<style>
+  .depth-card { border-color: #e7dcc7; background: linear-gradient(180deg, rgba(255,255,255,0.98), #fffaf0); }
+  .depth-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0 14px; }
+  .depth-controls label { display: inline-flex; align-items: center; gap: 8px; color: #334155; font-size: 13px; font-weight: 700; }
+  .depth-controls select { border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; color: #0f172a; padding: 7px 10px; font: inherit; }
+  .depth-chart-shell { min-height: 330px; border: 1px solid #e2e8f0; border-radius: 16px; background: #fff; padding: 12px; }
+  .depth-svg { width: 100%; height: auto; display: block; }
+  .depth-axis text { fill: #475569; font-size: 11px; }
+  .depth-axis path, .depth-axis line { stroke: #cbd5e1; }
+  .depth-grid line { stroke: #e2e8f0; stroke-dasharray: 3 4; }
+  .depth-line { fill: none; stroke-width: 2.6; }
+  .depth-point { stroke: #fff; stroke-width: 1.4; }
+  .depth-empty { padding: 22px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #475569; background: #fff; }
+  .depth-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; color: #475569; font-size: 12px; }
+  .depth-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .depth-swatch { width: 12px; height: 12px; border-radius: 999px; display: inline-block; }
+  .depth-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 12px; }
+  .depth-summary-card { border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; padding: 12px; }
+  .depth-summary-card .k { display: block; font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; }
+  .depth-summary-card .v { display: block; color: #0f172a; font-size: 18px; font-weight: 850; margin-top: 4px; }
+  .depth-summary-card .s { display: block; color: #64748b; font-size: 12px; margin-top: 3px; line-height: 1.35; }
+  .depth-tooltip { position: fixed; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: rgba(15, 23, 42, 0.96); color: #f8fafc; border-radius: 12px; padding: 10px 12px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22); font-size: 12px; line-height: 1.45; max-width: 280px; }
+  .depth-tooltip strong { display: block; font-size: 13px; margin-bottom: 4px; color: #fff; }
+  .depth-tooltip .metric { display: flex; justify-content: space-between; gap: 14px; white-space: nowrap; }
+  .depth-tooltip .metric span:first-child { color: #cbd5e1; }
+</style>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  const dataNode = document.getElementById("depth-runtime-data");
+  const chartNode = document.getElementById("depth-runtime-chart");
+  const cardsNode = document.getElementById("depth-summary-cards");
+  const modeSelect = document.getElementById("depth-runtime-mode");
+  if (!dataNode || !chartNode || !cardsNode || typeof d3 === "undefined") {
+    return;
+  }
+  const payload = JSON.parse(dataNode.textContent);
+  const colors = { A: "#8a8f98", B: "#e25a1c", C: "#3762e0", D: "#0f9f7a" };
+  const tooltip = d3.select("body").selectAll(".depth-tooltip").data([null]).join("div").attr("class", "depth-tooltip");
+
+  function fmtSec(value) {
+    if (!Number.isFinite(value)) return "-";
+    if (value >= 10) return `${value.toFixed(1)}s`;
+    if (value >= 1) return `${value.toFixed(2)}s`;
+    return `${(value * 1000).toFixed(1)}ms`;
+  }
+
+  function fmtRate(value) {
+    if (!Number.isFinite(value)) return "-";
+    return value >= 100 ? `${Math.round(value)}/s` : `${value.toFixed(1)}/s`;
+  }
+
+  function fmtSlope(value) {
+    if (!Number.isFinite(value)) return "-";
+    const sign = value > 0 ? "+" : "";
+    return `${sign}${fmtSec(value)} / depth`;
+  }
+
+  function showTooltip(event, point, mode) {
+    tooltip.style("opacity", 1).html(`
+      <strong>Config ${point.config} · depth ${point.depth}</strong>
+      <div class="metric"><span>Warm runtime</span><span>${fmtSec(point.warm_sec)}</span></div>
+      <div class="metric"><span>Cold runtime</span><span>${fmtSec(point.cold_sec)}</span></div>
+      <div class="metric"><span>Rows/sec</span><span>${fmtRate(point.rows_per_sec)}</span></div>
+      <div class="metric"><span>Speedup vs B</span><span>${Number.isFinite(point.speedup_vs_b) ? `${point.speedup_vs_b.toFixed(2)}x` : "-"}</span></div>
+      <div class="metric"><span>Boundary tax</span><span>${Number.isFinite(point.boundary_tax_pct) ? `${point.boundary_tax_pct.toFixed(1)}%` : "-"}</span></div>
+      <div class="metric"><span>Plotted metric</span><span>${mode === "warm_sec" ? "Warm" : "Cold"}</span></div>
+    `);
+    const rect = tooltip.node().getBoundingClientRect();
+    let left = event.clientX + 16;
+    let top = event.clientY + 16;
+    if (left + rect.width + 18 > window.innerWidth) left = event.clientX - rect.width - 16;
+    if (top + rect.height + 18 > window.innerHeight) top = event.clientY - rect.height - 16;
+    tooltip.style("left", `${Math.max(8, left)}px`).style("top", `${Math.max(8, top)}px`);
+  }
+
+  function renderCards(mode) {
+    cardsNode.innerHTML = "";
+    const summaries = payload.summaries || [];
+    const spark = summaries.filter((d) => d.config === "A" || d.config === "B");
+    const sail = summaries.filter((d) => d.config === "C" || d.config === "D");
+    const slopeKey = mode === "warm_sec" ? "warm_slope_sec_per_depth" : "cold_slope_sec_per_depth";
+    const sparkMax = d3.max(spark, (d) => d[slopeKey]);
+    const sailMax = d3.max(sail, (d) => d[slopeKey]);
+    const depth3Candidates = summaries.filter((d) => Number.isFinite(d.depth3_warm_sec));
+    const bestDepth3 = depth3Candidates.sort((a, b) => a.depth3_warm_sec - b.depth3_warm_sec)[0];
+    const cards = [
+      { k: "Spark depth sensitivity", v: fmtSlope(sparkMax), s: "Largest A/B runtime slope across observed W0 depths." },
+      { k: "Sail depth sensitivity", v: fmtSlope(sailMax), s: "Largest C/D runtime slope across observed W0 depths." },
+      { k: "Best depth-3 config", v: bestDepth3 ? `Config ${bestDepth3.config}` : "-", s: bestDepth3 ? `${fmtSec(bestDepth3.depth3_warm_sec)} warm runtime at depth 3.` : "Depth 3 was not present." },
+      { k: "Depth sweep coverage", v: payload.hasEnoughDepths ? `${payload.depths.length} depths` : "Insufficient", s: payload.hasEnoughDepths ? "Trend is based on multiple depths." : "Need at least two W0 depths to infer amplification." },
+    ];
+    cards.forEach((card) => {
+      const node = document.createElement("div");
+      node.className = "depth-summary-card";
+      node.innerHTML = `<span class="k">${card.k}</span><span class="v">${card.v}</span><span class="s">${card.s}</span>`;
+      cardsNode.appendChild(node);
+    });
+  }
+
+  function render() {
+    const mode = modeSelect.value || "warm_sec";
+    chartNode.innerHTML = "";
+    renderCards(mode);
+    if (!payload.series || payload.series.length === 0) {
+      chartNode.innerHTML = '<div class="depth-empty">No W0 depth-scaling rows were found for this run.</div>';
+      return;
+    }
+    if (!payload.hasEnoughDepths) {
+      chartNode.innerHTML = '<div class="depth-empty">Insufficient W0 depth sweep: only one depth was recorded. The boundary-amplification story needs at least two depths to avoid overclaiming.</div>';
+      return;
+    }
+
+    const activeSeries = payload.series.map((series) => ({
+      ...series,
+      points: (series.points || []).filter((point) => Number.isFinite(point[mode])),
+    })).filter((series) => series.points.length > 0);
+    const width = chartNode.getBoundingClientRect().width || 960;
+    const height = 330;
+    const margin = { top: 20, right: 30, bottom: 42, left: 88 };
+    const innerWidth = Math.max(220, width - margin.left - margin.right);
+    const innerHeight = height - margin.top - margin.bottom;
+    const maxRuntime = d3.max(activeSeries.flatMap((series) => series.points), (d) => d[mode]) || 1;
+    const x = d3.scalePoint().domain((payload.depths || []).map(String)).range([0, innerWidth]).padding(0.35);
+    const y = d3.scaleLinear().domain([0, maxRuntime * 1.12]).nice().range([innerHeight, 0]);
+    const line = d3.line()
+      .x((d) => x(String(d.depth)))
+      .y((d) => y(d[mode]))
+      .curve(d3.curveMonotoneX);
+    const svg = d3.select(chartNode).append("svg")
+      .attr("class", "depth-svg")
+      .attr("viewBox", `0 0 ${width} ${height}`)
+      .attr("role", "img")
+      .attr("aria-label", "W0 runtime by pipeline depth");
+    const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+    g.append("g")
+      .attr("class", "depth-grid")
+      .call(d3.axisLeft(y).ticks(5).tickSize(-innerWidth).tickFormat(""))
+      .selectAll("line")
+      .attr("stroke", "#e2e8f0");
+    g.append("g").attr("class", "depth-axis").call(d3.axisLeft(y).ticks(5).tickFormat((d) => fmtSec(Number(d))));
+    g.append("g").attr("class", "depth-axis").attr("transform", `translate(0,${innerHeight})`).call(d3.axisBottom(x));
+    g.append("text").attr("x", innerWidth / 2).attr("y", innerHeight + 36).attr("text-anchor", "middle").attr("fill", "#64748b").attr("font-size", 12).text("W0 chained-UDF pipeline depth");
+    g.append("text").attr("transform", "rotate(-90)").attr("x", -innerHeight / 2).attr("y", -70).attr("text-anchor", "middle").attr("fill", "#64748b").attr("font-size", 12).text(mode === "warm_sec" ? "Warm runtime" : "Cold runtime");
+
+    const groups = g.selectAll(".depth-series").data(activeSeries).join("g").attr("class", "depth-series");
+    groups.append("path")
+      .attr("class", "depth-line")
+      .attr("stroke", (d) => colors[d.config] || "#334155")
+      .attr("d", (d) => line(d.points));
+    groups.selectAll("circle")
+      .data((d) => d.points.map((point) => ({ ...point, config: d.config, label: d.label })))
+      .join("circle")
+      .attr("class", "depth-point")
+      .attr("cx", (d) => x(String(d.depth)))
+      .attr("cy", (d) => y(d[mode]))
+      .attr("r", 4)
+      .attr("fill", (d) => colors[d.config] || "#334155")
+      .on("pointerenter", (event, d) => showTooltip(event, d, mode))
+      .on("pointermove", (event, d) => showTooltip(event, d, mode))
+      .on("pointerleave", () => tooltip.style("opacity", 0));
+
+    const legend = document.createElement("div");
+    legend.className = "depth-legend";
+    activeSeries.forEach((series) => {
+      const row = document.createElement("span");
+      row.className = "depth-legend-item";
+      row.innerHTML = `<span class="depth-swatch" style="background:${colors[series.config] || "#334155"}"></span>Config ${series.config} · ${series.label}`;
+      legend.appendChild(row);
+    });
+    chartNode.appendChild(legend);
+  }
+
+  modeSelect.addEventListener("change", render);
+  render();
+  if ("ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => window.requestAnimationFrame(render));
+    observer.observe(chartNode);
+  } else {
+    window.addEventListener("resize", render);
+  }
+})();
+</script>
+""".replace("__PAYLOAD__", payload_json)
+
+
 def _build_disk_io_payload(run_df: pd.DataFrame) -> dict[str, Any]:
     configs = ["A", "B", "C", "D"]
     if run_df.empty:
@@ -2682,6 +2996,9 @@ def _write_html(
     gpu_utilization_section = _build_gpu_utilization_section(
         _build_gpu_utilization_payload(results_dir)
     )
+    depth_runtime_section = _build_depth_runtime_section(
+        _build_depth_runtime_payload(run_df)
+    )
     context = _load_report_context(results_dir)
 
     template = Template(
@@ -2969,40 +3286,24 @@ def _write_html(
       {% endfor %}
     </div>
   </div>
+  {{ depth_runtime_section | safe }}
   {{ gpu_utilization_section | safe }}
   {{ overhead_breakdown_section | safe }}
   {{ disk_io_section | safe }}
   {{ memory_section | safe }}
   {{ speedup_section | safe }}
-  {% for plot in plots %}
-  <div class="card">
-    <h2>{{ plot.title }}</h2>
-    <p class="section-note">{{ plot.blurb }}</p>
-    <div class="img-container">
-      <img src="{{ plot.filename }}" alt="{{ plot.title }}">
-    </div>
-  </div>
-  {% endfor %}
 </body>
 </html>
         """
     )
 
-    plots = [
-        {
-            "title": "Depth Runtime",
-            "filename": "plots/depth_runtime.png",
-            "blurb": "Depth = number of sequential UDF pipeline stages, where each stage does a trivially cheap computation. W0 runtime as a function of chain depth. Slope quantifies the per-crossing overhead tax that accumulates with each additional engine–Python round trip.",
-        },
-    ]
-
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "aggregate.html").write_text(
         template.render(
             rows=rows,
-            plots=plots,
             tel_cards=tel_cards,
             tel_maxes=tel_maxes,
+            depth_runtime_section=depth_runtime_section,
             gpu_utilization_section=gpu_utilization_section,
             overhead_breakdown_section=overhead_breakdown_section,
             disk_io_section=disk_io_section,
@@ -3014,6 +3315,8 @@ def _write_html(
 
 
 def _run_plot_scripts(results_dir: Path, plots_dir: Path) -> None:
+    if not PLOT_SCRIPTS:
+        return
     print("Generating plots...", flush=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
     mpl_dir = plots_dir / ".mplconfig"

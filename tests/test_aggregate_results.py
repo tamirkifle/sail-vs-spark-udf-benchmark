@@ -166,11 +166,14 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert 'id="disk-io-data"' in html
     assert 'id="gpu-utilization-chart"' in html
     assert 'id="gpu-utilization-data"' in html
+    assert 'id="depth-runtime-chart"' in html
+    assert 'id="depth-runtime-data"' in html
     assert "Runtime Budget Breakdown" in html
     assert "GPU Utilization &amp; vLLM Activity" in html
     assert "gpu_memory_utilization" in html
     assert "vllm_gpu_cache_usage_pct" in html
     assert "gpu_util_pct" in html
+    assert "Boundary Amplification: W0 Depth Scaling" in html
     assert "Disk Materialization &amp; IO" in html
     assert "Memory Comparison" in html
     assert "Relative Speedups" in html
@@ -192,6 +195,7 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert "Pattern-filled bars indicate fallback output-footprint values" in html
     assert "disk_io.png" not in html
     assert "gpu_timeline.png" not in html
+    assert "depth_runtime.png" not in html
 
 
 def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -> None:
@@ -229,6 +233,47 @@ def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -
     assert (results_dir / "report" / "aggregate.html").exists()
     html = (results_dir / "report" / "aggregate.html").read_text()
     assert "No GPU/vLLM activity samples recorded" in html
+    assert "Insufficient W0 depth sweep" in html
+
+
+def test_aggregate_depth_runtime_payload_uses_w0_depth_sweep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    results_dir = tmp_path / "results"
+    monkeypatch.setattr(aggregate_results, "_run_plot_scripts", lambda *_: None)
+    for depth, wall in [(1, 1.0), (3, 2.0)]:
+        run_dir = results_dir / "runs" / f"w0_B_depth{depth}_s1"
+        run_dir.mkdir(parents=True)
+        _write_json(run_dir / "trace.json", {"traceEvents": []})
+        _write_json(
+            run_dir / "stats.json",
+            {
+                "wall_clock_sec": wall,
+                "output_rows": 100,
+                "samples": [],
+            },
+        )
+        _write_json(
+            run_dir / "manifest.json",
+            {
+                "run_id": f"w0_B_depth{depth}_s1",
+                "workload": "w0",
+                "execution": "B",
+                "depth": depth,
+                "stats_json": str(run_dir / "stats.json"),
+                "trace_json": str(run_dir / "trace.json"),
+                "wall_clock_sec": wall,
+                "output_rows": 100,
+            },
+        )
+
+    aggregate_results.aggregate(str(results_dir))
+
+    html = (results_dir / "report" / "aggregate.html").read_text()
+    assert '"hasEnoughDepths": true' in html
+    assert '"depths": [1, 3]' in html
+    assert '"warm_slope_sec_per_depth": 0.5' in html
+    assert "Insufficient W0 depth sweep" in html
 
 
 def test_aggregate_falls_back_to_output_materialization_without_runtime_disk_telemetry(
