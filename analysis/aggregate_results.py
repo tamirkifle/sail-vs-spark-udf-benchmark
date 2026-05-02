@@ -82,7 +82,6 @@ PLOT_SCRIPTS = [
     ("analysis/plot_depth_runtime.py", "depth_runtime.png"),
     ("analysis/plot_gpu_timeline.py", "gpu_timeline.png"),
     ("analysis/plot_disk_io.py", "disk_io.png"),
-    ("analysis/plot_serialization.py", "serialization_pies.png"),
 ]
 
 SAIL_SVG = """
@@ -752,17 +751,28 @@ def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
         return {
             "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
             "workloads": [],
-            "maxWallSec": 0.0,
+            "maxSharePct": 100.0,
         }
 
-    rows = run_df[["Workload", "Config", "WallTime", "UDFTime_sec"]].copy()
-    rows["RawUDFTime_sec"] = rows["UDFTime_sec"]
-    rows["UDFTime_sec"] = rows.apply(
-        lambda row: min(float(row["WallTime"]), float(row["UDFTime_sec"])),
-        axis=1,
+    rows = run_df[
+        [
+            "Workload",
+            "Config",
+            "WallTime",
+            "TransferTime_sec",
+            "UDFTime_sec",
+            "TraceComputeTime_sec",
+        ]
+    ].copy()
+    rows["Serialization_sec"] = rows["TransferTime_sec"].fillna(0.0).clip(lower=0.0)
+    rows["Compute_sec"] = (
+        rows["UDFTime_sec"].fillna(0.0) + rows["TraceComputeTime_sec"].fillna(0.0)
+    ).clip(lower=0.0)
+    rows["Accounted_sec"] = (rows["Serialization_sec"] + rows["Compute_sec"]).clip(
+        lower=0.0
     )
-    rows["Overhead_sec"] = rows.apply(
-        lambda row: max(0.0, float(row["WallTime"]) - float(row["UDFTime_sec"])),
+    rows["Untimed_sec"] = rows.apply(
+        lambda row: max(0.0, float(row["WallTime"]) - float(row["Accounted_sec"])),
         axis=1,
     )
     agg = (
@@ -781,23 +791,32 @@ def _build_overhead_breakdown_payload(run_df: pd.DataFrame) -> dict[str, Any]:
         bars = []
         for _, row in workload_df.iterrows():
             config = str(row["Config"])
+            wall_sec = round(float(row["WallTime"]), 6)
+            serial_sec = round(min(wall_sec, float(row["Serialization_sec"])), 6)
+            compute_cap = max(0.0, wall_sec - serial_sec)
+            compute_sec = round(min(compute_cap, float(row["Compute_sec"])), 6)
+            untimed_sec = round(max(0.0, wall_sec - serial_sec - compute_sec), 6)
+            denom = max(wall_sec, serial_sec + compute_sec + untimed_sec, 1e-12)
             bars.append(
                 {
+                    "workload": workload,
                     "config": config,
                     "label": get_label(config),
-                    "wall_sec": round(float(row["WallTime"]), 6),
-                    "udf_sec": round(float(row["UDFTime_sec"]), 6),
-                    "raw_udf_sec": round(float(row["RawUDFTime_sec"]), 6),
-                    "overhead_sec": round(float(row["Overhead_sec"]), 6),
+                    "wall_sec": wall_sec,
+                    "serial_sec": serial_sec,
+                    "compute_sec": compute_sec,
+                    "untimed_sec": untimed_sec,
+                    "serial_pct": round(serial_sec / denom * 100.0, 3),
+                    "compute_pct": round(compute_sec / denom * 100.0, 3),
+                    "untimed_pct": round(untimed_sec / denom * 100.0, 3),
                 }
             )
         workloads.append({"workload": workload, "bars": bars})
 
-    max_wall = float(agg["WallTime"].max()) if not agg.empty else 0.0
     return {
         "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
         "workloads": workloads,
-        "maxWallSec": round(max_wall, 6),
+        "maxSharePct": 100.0,
     }
 
 
@@ -813,18 +832,19 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
     legend_markup = "".join(legend_html)
     return """
 <div class="card overhead-card">
-  <h2>Overhead Breakdown</h2>
-  <p class="section-note">This D3-based view keeps the original decomposition but packages it as an interactive HTML chart. Each panel shows mean wall time per execution config, stacked into traced UDF compute and residual framework overhead.</p>
+  <h2>Runtime Budget Breakdown</h2>
+  <p class="section-note">This consolidated D3 view replaces the older overhead and serialization plots with one trace-accounted runtime budget. Each workload panel compares execution configs by share of wall time, split into traced serialization, traced compute, and residual untimed or framework time. Right-edge labels show mean wall time.</p>
   <div class="overhead-legend">
     <div class="overhead-legend-group">
       <span class="overhead-legend-title">Execution configs</span>
       <div class="overhead-config-grid">__LEGEND__</div>
     </div>
     <div class="overhead-legend-group">
-      <span class="overhead-legend-title">Stacked components</span>
+      <span class="overhead-legend-title">Trace-accounted components</span>
       <div class="overhead-component-grid">
-        <span class="overhead-component-pill"><span class="overhead-swatch overhead-udf"></span>Traced UDF compute</span>
-        <span class="overhead-component-pill"><span class="overhead-swatch overhead-overhead"></span>Framework overhead</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-serial"></span>Serialization / transfer</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-compute"></span>Traced compute</span>
+        <span class="overhead-component-pill"><span class="overhead-swatch overhead-untimed"></span>Untimed / framework</span>
         <span class="overhead-component-pill"><span class="overhead-swatch overhead-total"></span>Total wall time label</span>
       </div>
     </div>
@@ -844,18 +864,23 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
   .overhead-config-pill strong { color: #0f172a; }
   .overhead-config-pill span { white-space: nowrap; }
   .overhead-swatch { width: 11px; height: 11px; border-radius: 999px; display: inline-block; flex: 0 0 auto; }
-  .overhead-udf { background: #2f9e44; }
-  .overhead-overhead { background: #e25a1c; }
+  .overhead-serial { background: #d97706; }
+  .overhead-compute { background: #2f9e44; }
+  .overhead-untimed { background: #e25a1c; }
   .overhead-total { background: #94a3b8; }
   .overhead-chart-shell { margin-top: 6px; }
-  .overhead-chart-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .overhead-chart-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
   .overhead-panel { border: 1px solid #e2e8f0; border-radius: 16px; background: linear-gradient(180deg, #fff, #f8fafc); padding: 14px 14px 12px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04); }
   .overhead-panel h3 { margin: 0; font-size: 16px; color: #0f172a; }
-  .overhead-panel .subtitle { margin: 3px 0 10px; font-size: 12px; color: #64748b; }
+  .overhead-panel .subtitle { margin: 3px 0 12px; font-size: 12px; color: #64748b; }
   .overhead-svg { width: 100%; height: auto; display: block; }
   .overhead-axis text { fill: #475569; font-size: 11px; }
   .overhead-axis path, .overhead-axis line { stroke: #cbd5e1; }
   .overhead-grid line { stroke: #e2e8f0; stroke-dasharray: 3 4; }
+  .overhead-share-label { fill: #0f172a; font-size: 11px; font-weight: 700; pointer-events: none; }
+  .overhead-wall-label { fill: #64748b; font-size: 11px; font-weight: 700; pointer-events: none; }
+  .overhead-note { grid-column: 1 / -1; margin-top: -2px; font-size: 12px; color: #64748b; }
+  .overhead-bar .segment { pointer-events: none; }
   .overhead-bar:hover .overhead-hit { fill: rgba(15, 23, 42, 0.03); }
   .overhead-tooltip { position: fixed; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: rgba(15, 23, 42, 0.96); color: #f8fafc; border-radius: 12px; padding: 10px 12px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22); font-size: 12px; line-height: 1.45; max-width: 260px; }
   .overhead-tooltip strong { display: block; font-size: 13px; margin-bottom: 4px; color: #fff; }
@@ -882,8 +907,9 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
     .attr("class", "overhead-tooltip");
 
   const palette = {
-    udf: "#2f9e44",
-    overhead: "#e25a1c",
+    serial: "#d97706",
+    compute: "#2f9e44",
+    untimed: "#e3c1ca",
     grid: "#e2e8f0",
     axis: "#94a3b8",
   };
@@ -901,12 +927,11 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
     return value >= 1 ? `${value.toFixed(2)}s` : `${value.toFixed(3)}s`;
   }
 
-  function estimateTextWidth(text, fontSize = 11) {
-    return String(text).length * fontSize * 0.62;
-  }
-
-  function clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
+  function formatPercent(value) {
+    if (!Number.isFinite(value)) {
+      return "-";
+    }
+    return value >= 10 ? `${Math.round(value)}%` : `${value.toFixed(1)}%`;
   }
 
   function hideTooltip() {
@@ -918,9 +943,9 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
       .style("opacity", 1)
       .html(`
         <strong>${datum.workload} · Config ${datum.config}</strong>
-        <div class="metric"><span>UDF compute</span><span>${formatSeconds(datum.udf_sec)}</span></div>
-        ${datum.raw_udf_sec > datum.udf_sec ? `<div class="metric"><span>Raw traced UDF</span><span>${formatSeconds(datum.raw_udf_sec)}</span></div>` : ""}
-        <div class="metric"><span>Framework overhead</span><span>${formatSeconds(datum.overhead_sec)}</span></div>
+        <div class="metric"><span>Serialization</span><span>${formatSeconds(datum.serial_sec)} · ${formatPercent(datum.serial_pct)}</span></div>
+        <div class="metric"><span>Traced compute</span><span>${formatSeconds(datum.compute_sec)} · ${formatPercent(datum.compute_pct)}</span></div>
+        <div class="metric"><span>Untimed / framework</span><span>${formatSeconds(datum.untimed_sec)} · ${formatPercent(datum.untimed_pct)}</span></div>
         <div class="metric"><span>Total wall time</span><span>${formatSeconds(datum.wall_sec)}</span></div>
       `);
 
@@ -940,71 +965,64 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
   function render() {
     chartNode.innerHTML = "";
     if (!payload.workloads || payload.workloads.length === 0) {
-      chartNode.innerHTML = '<div class="overhead-empty">No overhead timing data was found for this run.</div>';
+      chartNode.innerHTML = '<div class="overhead-empty">No trace-accounted timing data was found for this run.</div>';
       return;
     }
 
     const containerWidth = chartNode.getBoundingClientRect().width || chartNode.clientWidth || 960;
-    const minPanelWidth = 300;
-    const gap = 16;
-    const cols = Math.max(1, Math.min(3, Math.floor((containerWidth + gap) / minPanelWidth)));
-    chartNode.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
-
-    const panelWidth = (containerWidth - gap * (cols - 1)) / cols;
-    const panelHeight = 340;
-    const maxWall = Math.max(3.0, (payload.maxWallSec || 0) * 1.25);
-    const yAxisLabelWidth = estimateTextWidth(formatSeconds(maxWall, true));
-    const margin = { top: 44, right: 18, bottom: 38, left: Math.max(46, Math.ceil(yAxisLabelWidth + 20)) };
+    const panelWidth = containerWidth;
+    const panelHeight = 264;
+    const margin = { top: 16, right: 80, bottom: 36, left: 64 };
     const innerWidth = Math.max(180, panelWidth - margin.left - margin.right);
     const innerHeight = panelHeight - margin.top - margin.bottom;
-    const yScale = d3.scaleSymlog().constant(0.02).domain([0, maxWall]).nice().range([innerHeight, 0]);
-    const xScale = d3.scaleBand().domain(payload.configs.map((d) => d.code)).range([0, innerWidth]).padding(0.24);
-    const barWidth = xScale.bandwidth();
-
+    const xScale = d3.scaleLinear().domain([0, payload.maxSharePct || 100]).range([0, innerWidth]);
+    const yScale = d3.scaleBand().domain(payload.configs.map((d) => d.code)).range([0, innerHeight]).padding(0.24);
+    const barHeight = yScale.bandwidth();
     const svgWidth = innerWidth + margin.left + margin.right;
     const svgHeight = panelHeight;
 
     payload.workloads.forEach((workload) => {
       const panel = chartNode.appendChild(document.createElement("div"));
       panel.className = "overhead-panel";
-      panel.innerHTML = `<h3>${workload.workload}</h3><div class="subtitle">Mean wall time per execution config</div>`;
+      panel.innerHTML = `<h3>${workload.workload}</h3><div class="subtitle">Share of wall time by execution config</div>`;
 
       const svg = d3.select(panel)
         .append("svg")
         .attr("class", "overhead-svg")
         .attr("viewBox", `0 0 ${svgWidth} ${svgHeight}`)
         .attr("role", "img")
-        .attr("aria-label", `Overhead breakdown for workload ${workload.workload}`);
+        .attr("aria-label", `Runtime budget breakdown for workload ${workload.workload}`);
 
       const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
 
       g.append("g")
         .attr("class", "overhead-grid")
-        .call(d3.axisLeft(yScale).ticks(4).tickSize(-innerWidth).tickFormat(""))
+        .attr("transform", `translate(0,${innerHeight})`)
+        .call(d3.axisBottom(xScale).tickValues([0, 25, 50, 75, 100]).tickSize(-innerHeight).tickFormat(""))
         .selectAll("line")
         .attr("stroke", palette.grid);
 
       g.append("g")
         .attr("class", "overhead-axis")
-        .call(d3.axisLeft(yScale).ticks(4).tickFormat((d) => formatSeconds(d, true)));
+        .call(d3.axisLeft(yScale).tickSizeOuter(0));
 
       g.append("g")
         .attr("class", "overhead-axis")
         .attr("transform", `translate(0,${innerHeight})`)
-        .call(d3.axisBottom(xScale).tickSizeOuter(0));
+        .call(d3.axisBottom(xScale).tickValues([0, 25, 50, 75, 100]).tickFormat((d) => `${d}%`));
 
       const barGroups = g.selectAll(".overhead-bar")
         .data(workload.bars)
         .join("g")
         .attr("class", "overhead-bar")
-        .attr("transform", (d) => `translate(${xScale(d.config)},0)`);
+        .attr("transform", (d) => `translate(0,${yScale(d.config) || 0})`);
 
       barGroups.append("rect")
         .attr("class", "overhead-hit")
         .attr("x", 0)
         .attr("y", 0)
-        .attr("width", barWidth)
-        .attr("height", innerHeight)
+        .attr("width", innerWidth + margin.right)
+        .attr("height", barHeight)
         .attr("fill", "transparent")
         .on("pointerenter", function(event, d) {
           d3.select(this.parentNode).selectAll("rect.segment").attr("opacity", 0.92);
@@ -1021,33 +1039,70 @@ def _build_overhead_breakdown_section(chart_data: dict[str, Any]) -> str:
       barGroups.append("rect")
         .attr("class", "segment")
         .attr("x", 0)
-        .attr("y", (d) => yScale(d.udf_sec))
-        .attr("width", barWidth)
-        .attr("height", (d) => Math.max(0, innerHeight - yScale(d.udf_sec)))
-        .attr("fill", palette.udf);
+        .attr("y", 0)
+        .attr("width", (d) => Math.max(0, xScale(d.serial_pct)))
+        .attr("height", barHeight)
+        .attr("fill", palette.serial);
 
       barGroups.append("rect")
         .attr("class", "segment")
-        .attr("x", 0)
-        .attr("y", (d) => yScale(d.wall_sec))
-        .attr("width", barWidth)
-        .attr("height", (d) => Math.max(0, yScale(d.udf_sec) - yScale(d.wall_sec)))
-        .attr("fill", palette.overhead);
+        .attr("x", (d) => xScale(d.serial_pct))
+        .attr("y", 0)
+        .attr("width", (d) => Math.max(0, xScale(d.compute_pct)))
+        .attr("height", barHeight)
+        .attr("fill", palette.compute);
+
+      barGroups.append("rect")
+        .attr("class", "segment")
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct))
+        .attr("y", 0)
+        .attr("width", (d) => Math.max(0, xScale(d.untimed_pct)))
+        .attr("height", barHeight)
+        .attr("fill", palette.untimed);
+
+      barGroups.filter((d) => d.serial_pct >= 9).append("text")
+        .attr("class", "overhead-share-label")
+        .attr("x", (d) => xScale(d.serial_pct / 2))
+        .attr("y", barHeight / 2 + 4)
+        .attr("text-anchor", "middle")
+        .attr("fill", "#fff")
+        .text((d) => formatPercent(d.serial_pct));
+
+      barGroups.filter((d) => d.compute_pct >= 9).append("text")
+        .attr("class", "overhead-share-label")
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct / 2))
+        .attr("y", barHeight / 2 + 4)
+        .attr("text-anchor", "middle")
+        .attr("fill", "#fff")
+        .text((d) => formatPercent(d.compute_pct));
+
+      barGroups.filter((d) => d.untimed_pct >= 8).append("text")
+        .attr("class", "overhead-share-label")
+        .attr("x", (d) => xScale(d.serial_pct + d.compute_pct + d.untimed_pct / 2))
+        .attr("y", barHeight / 2 + 4)
+        .attr("text-anchor", "middle")
+        .text((d) => formatPercent(d.untimed_pct));
 
       barGroups.append("text")
-        .attr("x", (d) => {
-          const labelWidth = estimateTextWidth(formatSeconds(d.wall_sec, true), 11);
-          const barCenter = (xScale(d.config) || 0) + barWidth / 2;
-          const safeCenter = clamp(barCenter, labelWidth / 2 + 2, innerWidth - labelWidth / 2 - 2);
-          return safeCenter - (xScale(d.config) || 0);
-        })
-        .attr("y", (d) => Math.max(12, yScale(d.wall_sec) - 8))
-        .attr("text-anchor", "middle")
-        .attr("fill", palette.axis)
-        .attr("font-size", 11)
-        .attr("font-weight", 700)
+        .attr("class", "overhead-wall-label")
+        .attr("x", innerWidth + 10)
+        .attr("y", barHeight / 2 + 4)
+        .attr("text-anchor", "start")
         .text((d) => formatSeconds(d.wall_sec, true));
+
+      g.append("text")
+        .attr("x", innerWidth + 10)
+        .attr("y", innerHeight + 28)
+        .attr("fill", "#1d4ed8")
+        .attr("font-size", 10)
+        .attr("font-weight", 700)
+        .text("wall");
     });
+
+    const note = document.createElement("div");
+    note.className = "overhead-note";
+    note.textContent = "W0 values average depth 1/2/3 within each config before computing the time-budget split.";
+    chartNode.appendChild(note);
   }
 
   render();
@@ -1968,11 +2023,6 @@ def _write_html(
             "title": "Disk IO",
             "filename": "plots/disk_io.png",
             "blurb": "Bytes written to disk per run, with automatic unit scaling. Values elevated relative to input size indicate intermediate materialization or unnecessary data duplication.",
-        },
-        {
-            "title": "Serialization vs Compute",
-            "filename": "plots/serialization_pies.png",
-            "blurb": "Time budget decomposition per workload and configuration: traced model compute, traced serialization and transfer, and residual framework time. Unattributed time is the difference between wall-clock and the sum of instrumented spans.",
         },
     ]
 

@@ -111,10 +111,13 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert 'id="memory-comparison-data"' in html
     assert 'id="relative-speedups-chart"' in html
     assert 'id="relative-speedups-data"' in html
-    assert "Overhead Breakdown" in html
+    assert "Runtime Budget Breakdown" in html
     assert "Memory Comparison" in html
     assert "Relative Speedups" in html
     assert "Spark's batched path" in html
+    assert "Serialization vs Compute" not in html
+    assert ".overhead-untimed { background: #e25a1c; }" in html
+    assert 'untimed: "#e25a1c"' in html
 
 
 def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -> None:
