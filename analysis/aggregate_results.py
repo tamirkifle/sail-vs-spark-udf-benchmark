@@ -1635,8 +1635,26 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
     .attr("class", "disk-tooltip");
   const palette = { A: "#9e9e9e", B: "#e7a977", C: "#7ea6d8", D: "#7cc3b5" };
 
-  function formatMb(value) {
-    return value >= 0.1 ? `${value.toFixed(3)} MB` : `${(value * 1000).toFixed(1)} KB`;
+  function formatDiskValue(value) {
+    if (!Number.isFinite(value)) {
+      return "-";
+    }
+    if (value <= 0) {
+      return "0 B";
+    }
+    if (value < 0.001) {
+      return `${Math.round(value * 1_000_000)} B`;
+    }
+    if (value < 1) {
+      return `${(value * 1000).toFixed(1)} KB`;
+    }
+    if (value < 10) {
+      return `${value.toFixed(2)} MB`;
+    }
+    if (value < 100) {
+      return `${value.toFixed(1)} MB`;
+    }
+    return `${Math.round(value)} MB`;
   }
 
   function showTooltip(event, datum) {
@@ -1647,9 +1665,9 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
       .style("opacity", 1)
       .html(`
         <strong>${datum.workload} · Config ${datum.config}</strong>
-        <div class="metric"><span>Primary chart metric</span><span>${formatMb(datum.primary_metric_mb)}</span></div>
-        <div class="metric"><span>Measured runtime writes</span><span>${formatMb(datum.measured_write_mb)}</span></div>
-        <div class="metric"><span>Output materialized</span><span>${formatMb(datum.output_materialized_mb)}</span></div>
+        <div class="metric"><span>Primary chart metric</span><span>${formatDiskValue(datum.primary_metric_mb)}</span></div>
+        <div class="metric"><span>Measured runtime writes</span><span>${formatDiskValue(datum.measured_write_mb)}</span></div>
+        <div class="metric"><span>Output materialized</span><span>${formatDiskValue(datum.output_materialized_mb)}</span></div>
         <div class="metric"><span>Provenance</span><span>${datum.primary_source === "measured" ? `measured (${scopeLabel})` : "output fallback"}</span></div>
         <div class="metric"><span>Runtime write throughput</span><span>${datum.write_throughput_mb_s.toFixed(3)} MB/s</span></div>
         <div class="metric"><span>Output / 1k rows</span><span>${datum.output_mb_per_1k_rows.toFixed(3)} MB</span></div>
@@ -1679,7 +1697,7 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
     chartNode.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
     const panelWidth = (containerWidth - gap * (cols - 1)) / cols;
     const panelHeight = 286;
-    const margin = { top: 26, right: 16, bottom: 40, left: 56 };
+    const margin = { top: 26, right: 20, bottom: 40, left: 84 };
     const innerWidth = Math.max(180, panelWidth - margin.left - margin.right);
     const innerHeight = panelHeight - margin.top - margin.bottom;
     const maxMetric = Math.max(0.001, (payload.maxMetricMb || 0) * 1.2);
@@ -1687,6 +1705,7 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
     const xScale = d3.scaleBand().domain(payload.configs.map((d) => d.code)).range([0, innerWidth]).padding(0.22);
     const barWidth = xScale.bandwidth();
     const svgWidth = innerWidth + margin.left + margin.right;
+    const tickCandidates = d3.ticks(0, maxMetric, maxMetric < 1 ? 6 : 5);
 
     payload.workloads.forEach((workload) => {
       const panel = chartNode.appendChild(document.createElement("div"));
@@ -1714,12 +1733,12 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
       const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
       g.append("g")
         .attr("class", "disk-grid")
-        .call(d3.axisLeft(yScale).ticks(4).tickSize(-innerWidth).tickFormat(""))
+        .call(d3.axisLeft(yScale).tickValues(tickCandidates).tickSize(-innerWidth).tickFormat(""))
         .selectAll("line")
         .attr("stroke", "#e2e8f0");
       g.append("g")
         .attr("class", "disk-axis")
-        .call(d3.axisLeft(yScale).ticks(4).tickFormat((d) => formatMb(Number(d))));
+        .call(d3.axisLeft(yScale).tickValues(tickCandidates).tickFormat((d) => formatDiskValue(Number(d))));
       g.append("g")
         .attr("class", "disk-axis")
         .attr("transform", `translate(0,${innerHeight})`)
@@ -1755,7 +1774,7 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
         .attr("x", barWidth / 2)
         .attr("y", (d) => Math.max(12, yScale(d.primary_metric_mb) - 8))
         .attr("text-anchor", "middle")
-        .text((d) => formatMb(d.primary_metric_mb));
+        .text((d) => formatDiskValue(d.primary_metric_mb));
     });
   }
 
