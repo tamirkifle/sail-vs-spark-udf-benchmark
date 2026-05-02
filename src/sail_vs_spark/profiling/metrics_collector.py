@@ -62,6 +62,7 @@ class MetricsCollector:
         self._nvidia_proc: subprocess.Popen | None = None
         self._nvidia_log: str | None = None
         self._io_start: Any = None   # psutil io counters at start
+        self._io_scope: str = "unavailable"
         self._pid = os.getpid()
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -70,10 +71,8 @@ class MetricsCollector:
 
         self._start_time = time.perf_counter()
         self._running = True
-        try:
-            self._io_start = psutil.Process(self._pid).io_counters()
-        except Exception:
-            self._io_start = None
+        proc = psutil.Process(self._pid)
+        self._io_start, self._io_scope = self._get_initial_io_counters(psutil, proc)
         self._launch_nvidia_dmon()
         self._thread = threading.Thread(target=self._sample_loop, daemon=True)
         self._thread.start()
@@ -155,6 +154,28 @@ class MetricsCollector:
         except Exception:
             return {}
 
+    def _get_initial_io_counters(self, psutil: Any, proc: Any) -> tuple[Any, str]:
+        try:
+            return proc.io_counters(), "process"
+        except Exception:
+            pass
+        try:
+            return psutil.disk_io_counters(), "system"
+        except Exception:
+            return None, "unavailable"
+
+    def _sample_io(self, psutil: Any, proc: Any) -> dict[str, int]:
+        if self._io_scope == "process":
+            io = proc.io_counters()
+        elif self._io_scope == "system":
+            io = psutil.disk_io_counters()
+        else:
+            return {}
+        return {
+            "read_bytes": int(getattr(io, "read_bytes", 0) or 0),
+            "write_bytes": int(getattr(io, "write_bytes", 0) or 0),
+        }
+
 
     def _sample_loop(self) -> None:
         import psutil
@@ -176,12 +197,8 @@ class MetricsCollector:
                 pass
 
             try:
-                io = proc.io_counters()
-                sample["read_bytes"] = int(io.read_bytes)
-                sample["write_bytes"] = int(io.write_bytes)
+                sample.update(self._sample_io(psutil, proc))
             except Exception:
-                # psutil.Process.io_counters is not available on macOS
-                # for all versions — silently skip.
                 pass
 
             sample.update(self._sample_gpu())
@@ -251,6 +268,7 @@ class MetricsCollector:
                 round((write_delta / 1e6) / total_wall, 2)
                 if total_wall > 0 else 0.0
             ),
+            "disk_counter_scope": self._io_scope,
             # Raw samples for plotting
             "samples": self._samples,
             "nvidia_dmon_log": self._nvidia_log or None,

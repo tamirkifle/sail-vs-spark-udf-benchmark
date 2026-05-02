@@ -308,7 +308,10 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
     transfer_share = (trace.transfer_time_sec / wall_time * 100.0) if wall_time > 0 else 0.0
     compute_share = (trace.compute_time_sec / wall_time * 100.0) if wall_time > 0 else 0.0
     bytes_read_delta = int(stats.get("bytes_read_delta", 0) or 0)
+    disk_counter_scope = str(stats.get("disk_counter_scope", "unavailable") or "unavailable")
     measured_bytes_written = int(stats.get("bytes_written_delta", 0) or 0)
+    if disk_counter_scope == "unavailable" and measured_bytes_written > 0:
+        disk_counter_scope = "process"
     measured_mb_written = float(stats.get("mb_written_delta", 0.0) or 0.0)
     output_materialized_bytes = int(
         stats.get(
@@ -328,7 +331,7 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
     )
     if output_materialized_mb <= 0.0 and output_materialized_bytes > 0:
         output_materialized_mb = round(output_materialized_bytes / 1e6, 3)
-    disk_telemetry_available = measured_bytes_written > 0
+    disk_telemetry_available = disk_counter_scope != "unavailable"
     if disk_telemetry_available:
         bytes_written_delta = measured_bytes_written
         mb_written_delta = (
@@ -386,6 +389,7 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
             measured_mb_written if measured_mb_written > 0.0 else measured_bytes_written / 1e6,
             3,
         ) if measured_bytes_written > 0 else 0.0,
+        "MeasuredDiskScope": disk_counter_scope,
         "OutputMaterialized_Bytes": output_materialized_bytes,
         "OutputMaterialized_MB": round(output_materialized_mb, 3),
         "DiskTelemetryAvailable": bool(disk_telemetry_available),
@@ -1471,6 +1475,7 @@ def _build_disk_io_payload(run_df: pd.DataFrame) -> dict[str, Any]:
             "Rows",
             "MeasuredDiskWrite_MB",
             "MeasuredDiskWrite_Bytes",
+            "MeasuredDiskScope",
             "OutputMaterialized_MB",
             "OutputMaterialized_Bytes",
             "WriteThroughput_MBps",
@@ -1488,6 +1493,7 @@ def _build_disk_io_payload(run_df: pd.DataFrame) -> dict[str, Any]:
             Rows=("Rows", "mean"),
             MeasuredDiskWrite_MB=("MeasuredDiskWrite_MB", "mean"),
             MeasuredDiskWrite_Bytes=("MeasuredDiskWrite_Bytes", "mean"),
+            MeasuredDiskScopes=("MeasuredDiskScope", lambda vs: sorted({str(v) for v in vs if v})),
             OutputMaterialized_MB=("OutputMaterialized_MB", "mean"),
             OutputMaterialized_Bytes=("OutputMaterialized_Bytes", "mean"),
             WriteThroughput_MBps=("WriteThroughput_MBps", "mean"),
@@ -1527,6 +1533,7 @@ def _build_disk_io_payload(run_df: pd.DataFrame) -> dict[str, Any]:
                     "output_mb_per_1k_rows": round((output_mb / rows_value * 1000.0) if rows_value > 0 else 0.0, 6),
                     "disk_telemetry_coverage": round(float(row["DiskTelemetryCoverage"]) * 100.0, 1),
                     "disk_write_sources": list(row["DiskWriteSources"]),
+                    "measured_scopes": list(row["MeasuredDiskScopes"]),
                     "primary_metric_mb": primary_mb,
                     "primary_source": primary_source,
                     "fallback": primary_source != "measured",
@@ -1633,6 +1640,9 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
   }
 
   function showTooltip(event, datum) {
+    const scopeLabel = datum.measured_scopes && datum.measured_scopes.length
+      ? datum.measured_scopes.join(", ")
+      : "unavailable";
     tooltip
       .style("opacity", 1)
       .html(`
@@ -1640,7 +1650,7 @@ def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
         <div class="metric"><span>Primary chart metric</span><span>${formatMb(datum.primary_metric_mb)}</span></div>
         <div class="metric"><span>Measured runtime writes</span><span>${formatMb(datum.measured_write_mb)}</span></div>
         <div class="metric"><span>Output materialized</span><span>${formatMb(datum.output_materialized_mb)}</span></div>
-        <div class="metric"><span>Provenance</span><span>${datum.primary_source === "measured" ? "measured" : "output fallback"}</span></div>
+        <div class="metric"><span>Provenance</span><span>${datum.primary_source === "measured" ? `measured (${scopeLabel})` : "output fallback"}</span></div>
         <div class="metric"><span>Runtime write throughput</span><span>${datum.write_throughput_mb_s.toFixed(3)} MB/s</span></div>
         <div class="metric"><span>Output / 1k rows</span><span>${datum.output_mb_per_1k_rows.toFixed(3)} MB</span></div>
         <div class="metric"><span>Wall time</span><span>${datum.wall_sec.toFixed(3)}s</span></div>

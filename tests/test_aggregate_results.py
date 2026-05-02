@@ -111,6 +111,7 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert run_row["UntracedEngineRuntime_sec"] == 0.25
     assert run_row["BoundaryTax_sec"] == 3.5
     assert run_row["MeasuredDiskWrite_MB"] == 4.0
+    assert run_row["MeasuredDiskScope"] == "process"
     assert run_row["OutputMaterialized_MB"] == 0.0
     assert run_row["DiskWriteSource"] == "measured"
     assert bool(run_row["DiskTelemetryAvailable"]) is True
@@ -238,6 +239,7 @@ def test_aggregate_falls_back_to_output_materialization_without_runtime_disk_tel
     run_df = aggregate_results._build_run_df(results_dir)
     run_row = run_df.iloc[0]
     assert run_row["MeasuredDiskWrite_MB"] == 0.0
+    assert run_row["MeasuredDiskScope"] == "unavailable"
     assert run_row["OutputMaterialized_MB"] == round(len(payload) / 1e6, 3)
     assert run_row["DiskWriteSource"] == "output_artifact_fallback"
     assert bool(run_row["DiskTelemetryAvailable"]) is False

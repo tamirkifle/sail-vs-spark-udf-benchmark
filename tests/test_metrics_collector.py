@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,6 +49,7 @@ def test_report_includes_pipeline_continuity_key():
     r = c.report()
     assert "pipeline_continuity" in r
     assert "bytes_written_delta" in r
+    assert r["disk_counter_scope"] in {"process", "system", "unavailable"}
     assert 0.0 <= r["pipeline_continuity"] <= 1.0
 
 
@@ -62,3 +64,17 @@ def test_disk_io_fields_are_numeric():
     r = c.report()
     assert isinstance(r["bytes_written_delta"], int)
     assert r["bytes_written_delta"] >= 0
+
+
+def test_report_can_use_system_disk_scope_without_process_io():
+    c = MetricsCollector("io-scope-test", sample_interval_sec=0.05)
+    c._start_time = time.perf_counter() - 1.0
+    c._end_time = time.perf_counter()
+    c._io_scope = "system"
+    c._io_start = SimpleNamespace(read_bytes=100, write_bytes=200)
+    c._samples = [{"read_bytes": 140, "write_bytes": 320}]
+    r = c.report()
+    assert r["disk_counter_scope"] == "system"
+    assert r["bytes_read_delta"] == 40
+    assert r["bytes_written_delta"] == 120
+    assert r["mb_written_delta"] >= 0.0
