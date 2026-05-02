@@ -20,9 +20,11 @@ var/
 wheels/
 share/python-wheels/
 *.egg-info/
+src/sail_vs_spark_benchmark.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
+uv.lock
 
 # Testing
 .pytest_cache/
