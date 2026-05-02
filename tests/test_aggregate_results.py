@@ -349,6 +349,60 @@ def test_aggregate_falls_back_to_output_materialization_without_runtime_disk_tel
     assert "Measured runtime write telemetry was unavailable" in html
 
 
+def test_aggregate_falls_back_to_output_materialization_when_measured_writes_are_zero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    results_dir = tmp_path / "results"
+    run_dir = results_dir / "runs" / "w2_A_s1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(aggregate_results, "_run_plot_scripts", lambda *_: None)
+
+    output_dir = run_dir / "output.parquet"
+    output_dir.mkdir()
+    payload = b"x" * 8192
+    (output_dir / "part-0000.parquet").write_bytes(payload)
+
+    _write_json(run_dir / "trace.json", {"traceEvents": []})
+    _write_json(
+        run_dir / "stats.json",
+        {
+            "wall_clock_sec": 0.5,
+            "disk_counter_scope": "process",
+            "bytes_written_delta": 0,
+            "mb_written_delta": 0.0,
+            "write_throughput_mb_s": 0.0,
+            "output_rows": 100,
+            "samples": [],
+        },
+    )
+    _write_json(
+        run_dir / "manifest.json",
+        {
+            "run_id": "w2_A_s1",
+            "workload": "w2",
+            "execution": "A",
+            "stats_json": str(run_dir / "stats.json"),
+            "trace_json": str(run_dir / "trace.json"),
+            "output_parquet": str(output_dir),
+            "output_rows": 100,
+            "wall_clock_sec": 0.5,
+        },
+    )
+
+    summary = aggregate_results.aggregate(str(results_dir))
+    row = summary.iloc[0]
+    output_mb = round(len(payload) / 1e6, 3)
+    assert row["Measured Runtime Writes (MB)"] == 0.0
+    assert row["Disk Write (MB)"] == output_mb
+    assert row["Disk Metric Kind"] == "output_materialization"
+
+    run_df = aggregate_results._build_run_df(results_dir)
+    run_row = run_df.iloc[0]
+    assert bool(run_row["DiskTelemetryAvailable"]) is True
+    assert run_row["DiskWriteSource"] == "output_artifact_fallback"
+    assert run_row["DiskWrite_MB"] == output_mb
+
+
 def test_summarize_trace_splits_detailed_phases_and_window(tmp_path: Path) -> None:
     trace_path = tmp_path / "trace.json"
     _write_json(

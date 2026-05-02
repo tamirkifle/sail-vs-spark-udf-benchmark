@@ -329,7 +329,7 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
     if output_materialized_mb <= 0.0 and output_materialized_bytes > 0:
         output_materialized_mb = round(output_materialized_bytes / 1e6, 3)
     disk_telemetry_available = disk_counter_scope != "unavailable"
-    if disk_telemetry_available:
+    if disk_telemetry_available and measured_bytes_written > 0:
         bytes_written_delta = measured_bytes_written
         mb_written_delta = (
             measured_mb_written
@@ -503,7 +503,11 @@ def _build_summary_df(run_df: pd.DataFrame) -> pd.DataFrame:
         trace_compute_mean = float(perf["TraceComputeTime_sec"].mean())
         overhead_pct = max(0.0, ((perf_time - udf_mean) / perf_time * 100.0)) if perf_time > 0 else 0.0
         throughput = (float(perf["Rows"].mean()) / perf_time) if perf_time > 0 else 0.0
-        disk_metric_kind = "runtime_writes" if bool(group["DiskTelemetryAvailable"].any()) else "output_materialization"
+        disk_metric_kind = (
+            "runtime_writes"
+            if float(group["MeasuredDiskWrite_Bytes"].max()) > 0
+            else "output_materialization"
+        )
 
         summary_rows.append(
             {
@@ -2254,7 +2258,8 @@ def _build_disk_io_payload(run_df: pd.DataFrame) -> dict[str, Any]:
     ].copy()
     total_runs = int(len(rows))
     coverage_runs = int(rows["DiskTelemetryAvailable"].fillna(False).astype(bool).sum())
-    metric_kind = "runtime_writes" if coverage_runs > 0 else "output_materialization"
+    positive_measured_runs = int((rows["MeasuredDiskWrite_Bytes"].fillna(0) > 0).sum())
+    metric_kind = "runtime_writes" if positive_measured_runs > 0 else "output_materialization"
     agg = (
         rows.groupby(["Workload", "Config"], dropna=False, as_index=False)
         .agg(
