@@ -52,6 +52,14 @@ def workload_depth(cfg: dict[str, Any], workload: str) -> int | None:
     return int(cfg.get("workloads", {}).get("w0_chained", {}).get("depth", 1))
 
 
+def _path_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return int(path.stat().st_size)
+    return sum(int(child.stat().st_size) for child in path.rglob("*") if child.is_file())
+
+
 def execute_run(
     spark: Any,
     cfg: dict[str, Any],
@@ -85,6 +93,7 @@ def execute_run(
     collector.start()
     wall_start_ts = time.time()
     t0 = time.perf_counter()
+    output_materialized_bytes = 0
     try:
         n_rows = run_workload(
             spark=spark,
@@ -94,6 +103,7 @@ def execute_run(
             cfg=cfg,
             output_parquet=artifacts.output_parquet,
         )
+        output_materialized_bytes = _path_size_bytes(Path(artifacts.output_parquet))
     finally:
         wall = time.perf_counter() - t0
         wall_end_ts = time.time()
@@ -109,6 +119,8 @@ def execute_run(
                 "run_start_wall_ts": wall_start_ts,
                 "run_end_wall_ts": wall_end_ts,
                 "output_rows": int(n_rows) if isinstance(n_rows, int) else None,
+                "output_materialized_bytes": int(output_materialized_bytes),
+                "output_materialized_mb": round(output_materialized_bytes / 1e6, 3),
             },
         )
 
@@ -122,6 +134,8 @@ def execute_run(
         output_parquet=artifacts.output_parquet if Path(artifacts.output_parquet).exists() else None,
         wall_clock_sec=round(wall, 3),
         output_rows=int(n_rows) if isinstance(n_rows, int) else None,
+        output_materialized_bytes=int(output_materialized_bytes),
+        output_materialized_mb=round(output_materialized_bytes / 1e6, 3),
         boundary_json=None,
         stats_json=artifacts.stats_json,
         trace_json=trace_path,

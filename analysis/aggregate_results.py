@@ -95,7 +95,6 @@ TRACE_COMPUTE_PHASES = {
 PLOT_SCRIPTS = [
     ("analysis/plot_depth_runtime.py", "depth_runtime.png"),
     ("analysis/plot_gpu_timeline.py", "gpu_timeline.png"),
-    ("analysis/plot_disk_io.py", "disk_io.png"),
 ]
 
 SAIL_SVG = """
@@ -309,15 +308,44 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
     transfer_share = (trace.transfer_time_sec / wall_time * 100.0) if wall_time > 0 else 0.0
     compute_share = (trace.compute_time_sec / wall_time * 100.0) if wall_time > 0 else 0.0
     bytes_read_delta = int(stats.get("bytes_read_delta", 0) or 0)
-    bytes_written_delta = int(stats.get("bytes_written_delta", 0) or 0)
-    if bytes_written_delta <= 0:
-        bytes_written_delta = _path_size_bytes(output_parquet_path)
-    mb_written_delta = float(stats.get("mb_written_delta", 0.0) or 0.0)
-    if mb_written_delta <= 0.0 and bytes_written_delta > 0:
-        mb_written_delta = round(bytes_written_delta / 1e6, 3)
+    measured_bytes_written = int(stats.get("bytes_written_delta", 0) or 0)
+    measured_mb_written = float(stats.get("mb_written_delta", 0.0) or 0.0)
+    output_materialized_bytes = int(
+        stats.get(
+            "output_materialized_bytes",
+            manifest.get("output_materialized_bytes", 0),
+        )
+        or 0
+    )
+    if output_materialized_bytes <= 0:
+        output_materialized_bytes = _path_size_bytes(output_parquet_path)
+    output_materialized_mb = float(
+        stats.get(
+            "output_materialized_mb",
+            manifest.get("output_materialized_mb", 0.0),
+        )
+        or 0.0
+    )
+    if output_materialized_mb <= 0.0 and output_materialized_bytes > 0:
+        output_materialized_mb = round(output_materialized_bytes / 1e6, 3)
+    disk_telemetry_available = measured_bytes_written > 0
+    if disk_telemetry_available:
+        bytes_written_delta = measured_bytes_written
+        mb_written_delta = (
+            measured_mb_written
+            if measured_mb_written > 0.0
+            else round(measured_bytes_written / 1e6, 3)
+        )
+        disk_write_source = "measured"
+    elif output_materialized_bytes > 0:
+        bytes_written_delta = output_materialized_bytes
+        mb_written_delta = output_materialized_mb
+        disk_write_source = "output_artifact_fallback"
+    else:
+        bytes_written_delta = 0
+        mb_written_delta = 0.0
+        disk_write_source = "none"
     write_throughput_mb_s = float(stats.get("write_throughput_mb_s", 0.0) or 0.0)
-    if write_throughput_mb_s <= 0.0 and wall_time > 0 and bytes_written_delta > 0:
-        write_throughput_mb_s = round((bytes_written_delta / 1e6) / wall_time, 3)
 
     return {
         "RunID": manifest["run_id"],
@@ -351,6 +379,17 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
         "PeakGPUMemUsed_MB": float(stats.get("peak_gpu_mem_used_mb", 0.0) or 0.0),
         "AvgGPUPower_W": float(stats.get("avg_gpu_power_w", 0.0) or 0.0),
         "PipelineContinuity": float(stats.get("pipeline_continuity", 0.0) or 0.0),
+        "MeasuredDiskRead_Bytes": bytes_read_delta,
+        "MeasuredDiskRead_MB": round(bytes_read_delta / 1e6, 3),
+        "MeasuredDiskWrite_Bytes": measured_bytes_written,
+        "MeasuredDiskWrite_MB": round(
+            measured_mb_written if measured_mb_written > 0.0 else measured_bytes_written / 1e6,
+            3,
+        ) if measured_bytes_written > 0 else 0.0,
+        "OutputMaterialized_Bytes": output_materialized_bytes,
+        "OutputMaterialized_MB": round(output_materialized_mb, 3),
+        "DiskTelemetryAvailable": bool(disk_telemetry_available),
+        "DiskWriteSource": disk_write_source,
         "BytesReadDelta": bytes_read_delta,
         "BytesWrittenDelta": bytes_written_delta,
         "DiskRead_MB": round(bytes_read_delta / 1e6, 3),
@@ -450,6 +489,7 @@ def _build_summary_df(run_df: pd.DataFrame) -> pd.DataFrame:
         trace_compute_mean = float(perf["TraceComputeTime_sec"].mean())
         overhead_pct = max(0.0, ((perf_time - udf_mean) / perf_time * 100.0)) if perf_time > 0 else 0.0
         throughput = (float(perf["Rows"].mean()) / perf_time) if perf_time > 0 else 0.0
+        disk_metric_kind = "runtime_writes" if bool(group["DiskTelemetryAvailable"].any()) else "output_materialization"
 
         summary_rows.append(
             {
@@ -477,7 +517,10 @@ def _build_summary_df(run_df: pd.DataFrame) -> pd.DataFrame:
                 "Pipeline Continuity": round(float(group["PipelineContinuity"].mean()), 3),
                 "Avg GPU Power (W)": round(float(group["AvgGPUPower_W"].mean()), 2),
                 "Disk Write (MB)": round(float(group["DiskWrite_MB"].mean()), 3),
+                "Measured Runtime Writes (MB)": round(float(group["MeasuredDiskWrite_MB"].mean()), 3),
+                "Output Materialized (MB)": round(float(group["OutputMaterialized_MB"].mean()), 3),
                 "Write Throughput (MB/s)": round(float(group["WriteThroughput_MBps"].mean()), 3),
+                "Disk Metric Kind": disk_metric_kind,
                 "Collector Samples": int(group["CollectorSamples"].max()),
                 "Trace Events": int(group["TraceEventCount"].sum()),
                 "Samples": int(len(group)),
@@ -860,11 +903,16 @@ def _build_tel_cards(rows: pd.DataFrame) -> tuple[list[dict], dict]:
         if cfgs:
             best_gpu  = max(c["Peak GPU Util (%)"]  for c in cfgs)
             best_cont = max(c["Pipeline Continuity"] for c in cfgs)
-            min_disk  = min(c["Disk Write (MB)"]     for c in cfgs)
+            min_disk  = min(c["Disk Write (MB)"] for c in cfgs)
             for c in cfgs:
                 c["BestGPU"]  = abs(c["Peak GPU Util (%)"]  - best_gpu)  < 0.05
                 c["BestCont"] = abs(c["Pipeline Continuity"] - best_cont) < 1e-6
-                c["BestDisk"] = abs(c["Disk Write (MB)"]    - min_disk)  < 1e-6
+                c["BestDisk"] = abs(c["Disk Write (MB)"] - min_disk) < 1e-6
+                c["DiskDisplayLabel"] = (
+                    "Runtime writes"
+                    if c.get("Disk Metric Kind") == "runtime_writes"
+                    else "Output bytes"
+                )
         cards.append({"workload": workload, "configs": cfgs})
     return cards, tel_maxes
 
@@ -1403,6 +1451,319 @@ def _build_speedup_payload(run_df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _build_disk_io_payload(run_df: pd.DataFrame) -> dict[str, Any]:
+    configs = ["A", "B", "C", "D"]
+    if run_df.empty:
+        return {
+            "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+            "workloads": [],
+            "coverageRuns": 0,
+            "totalRuns": 0,
+            "metricKind": "output_materialization",
+            "maxMetricMb": 0.0,
+        }
+
+    rows = run_df[
+        [
+            "Workload",
+            "Config",
+            "WallTime",
+            "Rows",
+            "MeasuredDiskWrite_MB",
+            "MeasuredDiskWrite_Bytes",
+            "OutputMaterialized_MB",
+            "OutputMaterialized_Bytes",
+            "WriteThroughput_MBps",
+            "DiskTelemetryAvailable",
+            "DiskWriteSource",
+        ]
+    ].copy()
+    total_runs = int(len(rows))
+    coverage_runs = int(rows["DiskTelemetryAvailable"].fillna(False).astype(bool).sum())
+    metric_kind = "runtime_writes" if coverage_runs > 0 else "output_materialization"
+    agg = (
+        rows.groupby(["Workload", "Config"], dropna=False, as_index=False)
+        .agg(
+            WallTime=("WallTime", "mean"),
+            Rows=("Rows", "mean"),
+            MeasuredDiskWrite_MB=("MeasuredDiskWrite_MB", "mean"),
+            MeasuredDiskWrite_Bytes=("MeasuredDiskWrite_Bytes", "mean"),
+            OutputMaterialized_MB=("OutputMaterialized_MB", "mean"),
+            OutputMaterialized_Bytes=("OutputMaterialized_Bytes", "mean"),
+            WriteThroughput_MBps=("WriteThroughput_MBps", "mean"),
+            DiskTelemetryCoverage=("DiskTelemetryAvailable", "mean"),
+            DiskWriteSources=("DiskWriteSource", lambda vs: sorted({str(v) for v in vs if v})),
+        )
+        .sort_values(["Workload", "Config"])
+    )
+
+    workloads: list[dict[str, Any]] = []
+    max_metric_mb = 0.0
+    for workload in sorted(agg["Workload"].unique()):
+        workload_df = agg[agg["Workload"] == workload].copy()
+        workload_df["Config"] = pd.Categorical(workload_df["Config"], categories=configs, ordered=True)
+        workload_df = workload_df.sort_values("Config")
+        bars = []
+        for _, row in workload_df.iterrows():
+            config = str(row["Config"])
+            measured_mb = round(float(row["MeasuredDiskWrite_MB"]), 3)
+            output_mb = round(float(row["OutputMaterialized_MB"]), 3)
+            primary_mb = measured_mb if metric_kind == "runtime_writes" else output_mb
+            primary_source = "measured" if metric_kind == "runtime_writes" else "output_artifact_fallback"
+            max_metric_mb = max(max_metric_mb, primary_mb)
+            rows_value = float(row["Rows"])
+            output_bytes = float(row["OutputMaterialized_Bytes"])
+            bars.append(
+                {
+                    "config": config,
+                    "label": get_label(config),
+                    "wall_sec": round(float(row["WallTime"]), 6),
+                    "rows": round(rows_value, 3),
+                    "measured_write_mb": measured_mb,
+                    "measured_write_bytes": int(round(float(row["MeasuredDiskWrite_Bytes"]))),
+                    "write_throughput_mb_s": round(float(row["WriteThroughput_MBps"]), 3),
+                    "output_materialized_mb": output_mb,
+                    "output_materialized_bytes": int(round(output_bytes)),
+                    "output_mb_per_1k_rows": round((output_mb / rows_value * 1000.0) if rows_value > 0 else 0.0, 6),
+                    "disk_telemetry_coverage": round(float(row["DiskTelemetryCoverage"]) * 100.0, 1),
+                    "disk_write_sources": list(row["DiskWriteSources"]),
+                    "primary_metric_mb": primary_mb,
+                    "primary_source": primary_source,
+                    "fallback": primary_source != "measured",
+                }
+            )
+        workloads.append({"workload": workload, "bars": bars})
+
+    return {
+        "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+        "workloads": workloads,
+        "coverageRuns": coverage_runs,
+        "totalRuns": total_runs,
+        "metricKind": metric_kind,
+        "maxMetricMb": round(max_metric_mb, 3),
+    }
+
+
+def _build_disk_io_section(chart_data: dict[str, Any]) -> str:
+    payload_json = json.dumps(chart_data, ensure_ascii=True).replace("</", "<\\/")
+    legend_html = []
+    for item in chart_data.get("configs", []):
+        code = escape(str(item.get("code", "")))
+        label = escape(str(item.get("label", "")))
+        legend_html.append(
+            f'<span class="disk-config-pill"><strong>{code}</strong><span>{label}</span></span>'
+        )
+    legend_markup = "".join(legend_html)
+    subtitle = (
+        "Measured runtime writes are available for __COVERAGE__ / __TOTAL__ runs. This D3 view compares true process-level write deltas where telemetry exists, and still shows final output materialization footprint for context."
+        if chart_data.get("metricKind") == "runtime_writes"
+        else "Measured runtime write telemetry was unavailable for this run set, so the chart falls back to final output materialization footprint. This is useful for comparing artifact size, not for claiming observed spill or runtime disk pressure."
+    )
+    return """
+<div class="card disk-card">
+  <h2>Disk Materialization &amp; IO</h2>
+  <p class="section-note">__SUBTITLE__</p>
+  <p class="section-note">Tooltips always separate measured runtime writes from output bytes and show provenance. Pattern-filled bars indicate fallback output-footprint values rather than observed runtime write telemetry.</p>
+  <div class="disk-legend">
+    <div class="disk-legend-group">
+      <span class="disk-legend-title">Execution configs</span>
+      <div class="disk-config-grid">__LEGEND__</div>
+    </div>
+    <div class="disk-legend-group">
+      <span class="disk-legend-title">Provenance</span>
+      <div class="disk-config-grid">
+        <span class="disk-config-pill"><span class="disk-swatch disk-solid"></span>Measured runtime writes</span>
+        <span class="disk-config-pill"><span class="disk-swatch disk-pattern"></span>Fallback output materialization</span>
+      </div>
+    </div>
+  </div>
+  <div class="disk-chart-shell">
+    <script type="application/json" id="disk-io-data">__PAYLOAD__</script>
+    <div id="disk-io-chart" class="disk-chart-grid"></div>
+  </div>
+</div>
+<style>
+  .disk-card { border: 1px solid #dbe7ff; background: linear-gradient(180deg, rgba(255,255,255,0.98), #f8fafc); }
+  .disk-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 10px 0 16px; }
+  .disk-legend-group { border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; padding: 12px 14px; }
+  .disk-legend-title { display: block; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b; margin-bottom: 10px; }
+  .disk-config-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .disk-config-pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 999px; border: 1px solid #e2e8f0; background: #f8fafc; color: #334155; font-size: 12px; line-height: 1.1; }
+  .disk-config-pill strong { color: #0f172a; }
+  .disk-config-pill span { white-space: nowrap; }
+  .disk-swatch { width: 11px; height: 11px; border-radius: 999px; display: inline-block; flex: 0 0 auto; border: 1px solid #94a3b8; }
+  .disk-solid { background: #7ea6d8; }
+  .disk-pattern { background: repeating-linear-gradient(135deg, #d9a35f 0 3px, #fff7ed 3px 6px); }
+  .disk-chart-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .disk-panel { border: 1px solid #e2e8f0; border-radius: 16px; background: linear-gradient(180deg, #fff, #f8fafc); padding: 14px 14px 12px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04); }
+  .disk-panel h3 { margin: 0; font-size: 16px; color: #0f172a; }
+  .disk-panel .subtitle { margin: 3px 0 10px; font-size: 12px; color: #64748b; }
+  .disk-svg { width: 100%; height: auto; display: block; }
+  .disk-axis text { fill: #475569; font-size: 11px; }
+  .disk-axis path, .disk-axis line { stroke: #cbd5e1; }
+  .disk-grid line { stroke: #e2e8f0; stroke-dasharray: 3 4; }
+  .disk-tooltip { position: fixed; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: rgba(15, 23, 42, 0.96); color: #f8fafc; border-radius: 12px; padding: 10px 12px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22); font-size: 12px; line-height: 1.45; max-width: 290px; }
+  .disk-tooltip strong { display: block; font-size: 13px; margin-bottom: 4px; color: #fff; }
+  .disk-tooltip .metric { display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; }
+  .disk-tooltip .metric span:first-child { color: #cbd5e1; }
+  .disk-empty { padding: 20px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #475569; background: #fff; }
+  .disk-bar:hover .disk-hit { fill: rgba(15, 23, 42, 0.03); }
+  .disk-value-label { fill: #64748b; font-size: 11px; font-weight: 700; }
+  @media (max-width: 760px) {
+    .disk-legend { grid-template-columns: 1fr; }
+  }
+</style>
+<script>
+(function() {
+  const dataNode = document.getElementById("disk-io-data");
+  const chartNode = document.getElementById("disk-io-chart");
+  if (!dataNode || !chartNode || typeof d3 === "undefined") {
+    return;
+  }
+
+  const payload = JSON.parse(dataNode.textContent);
+  const tooltip = d3.select("body").selectAll(".disk-tooltip")
+    .data([null])
+    .join("div")
+    .attr("class", "disk-tooltip");
+  const palette = { A: "#9e9e9e", B: "#e7a977", C: "#7ea6d8", D: "#7cc3b5" };
+
+  function formatMb(value) {
+    return value >= 0.1 ? `${value.toFixed(3)} MB` : `${(value * 1000).toFixed(1)} KB`;
+  }
+
+  function showTooltip(event, datum) {
+    tooltip
+      .style("opacity", 1)
+      .html(`
+        <strong>${datum.workload} · Config ${datum.config}</strong>
+        <div class="metric"><span>Primary chart metric</span><span>${formatMb(datum.primary_metric_mb)}</span></div>
+        <div class="metric"><span>Measured runtime writes</span><span>${formatMb(datum.measured_write_mb)}</span></div>
+        <div class="metric"><span>Output materialized</span><span>${formatMb(datum.output_materialized_mb)}</span></div>
+        <div class="metric"><span>Provenance</span><span>${datum.primary_source === "measured" ? "measured" : "output fallback"}</span></div>
+        <div class="metric"><span>Runtime write throughput</span><span>${datum.write_throughput_mb_s.toFixed(3)} MB/s</span></div>
+        <div class="metric"><span>Output / 1k rows</span><span>${datum.output_mb_per_1k_rows.toFixed(3)} MB</span></div>
+        <div class="metric"><span>Wall time</span><span>${datum.wall_sec.toFixed(3)}s</span></div>
+      `);
+    const rect = tooltip.node().getBoundingClientRect();
+    let left = event.clientX + 16;
+    let top = event.clientY + 16;
+    if (left + rect.width + 18 > window.innerWidth) left = event.clientX - rect.width - 16;
+    if (top + rect.height + 18 > window.innerHeight) top = event.clientY - rect.height - 16;
+    tooltip.style("left", `${Math.max(8, left)}px`).style("top", `${Math.max(8, top)}px`);
+  }
+
+  function hideTooltip() { tooltip.style("opacity", 0); }
+
+  function render() {
+    chartNode.innerHTML = "";
+    if (!payload.workloads || payload.workloads.length === 0) {
+      chartNode.innerHTML = '<div class="disk-empty">No disk telemetry or output materialization data was found for this run.</div>';
+      return;
+    }
+
+    const containerWidth = chartNode.getBoundingClientRect().width || chartNode.clientWidth || 960;
+    const minPanelWidth = 300;
+    const gap = 16;
+    const cols = Math.max(1, Math.min(3, Math.floor((containerWidth + gap) / minPanelWidth)));
+    chartNode.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+    const panelWidth = (containerWidth - gap * (cols - 1)) / cols;
+    const panelHeight = 286;
+    const margin = { top: 26, right: 16, bottom: 40, left: 56 };
+    const innerWidth = Math.max(180, panelWidth - margin.left - margin.right);
+    const innerHeight = panelHeight - margin.top - margin.bottom;
+    const maxMetric = Math.max(0.001, (payload.maxMetricMb || 0) * 1.2);
+    const yScale = d3.scaleLinear().domain([0, maxMetric]).nice().range([innerHeight, 0]);
+    const xScale = d3.scaleBand().domain(payload.configs.map((d) => d.code)).range([0, innerWidth]).padding(0.22);
+    const barWidth = xScale.bandwidth();
+    const svgWidth = innerWidth + margin.left + margin.right;
+
+    payload.workloads.forEach((workload) => {
+      const panel = chartNode.appendChild(document.createElement("div"));
+      panel.className = "disk-panel";
+      panel.innerHTML = `<h3>${workload.workload}</h3><div class="subtitle">${payload.metricKind === "runtime_writes" ? "Measured runtime disk writes when available" : "Final output materialization footprint"}</div>`;
+      const svg = d3.select(panel)
+        .append("svg")
+        .attr("class", "disk-svg")
+        .attr("viewBox", `0 0 ${svgWidth} ${panelHeight}`)
+        .attr("role", "img")
+        .attr("aria-label", `Disk comparison for workload ${workload.workload}`);
+      const defs = svg.append("defs");
+      workload.bars.forEach((bar) => {
+        if (!bar.fallback) return;
+        const patternId = `disk-pattern-${workload.workload.toLowerCase()}-${bar.config.toLowerCase()}`;
+        const pattern = defs.append("pattern")
+          .attr("id", patternId)
+          .attr("patternUnits", "userSpaceOnUse")
+          .attr("width", 8)
+          .attr("height", 8)
+          .attr("patternTransform", "rotate(135)");
+        pattern.append("rect").attr("width", 8).attr("height", 8).attr("fill", "#fff7ed");
+        pattern.append("rect").attr("width", 4).attr("height", 8).attr("fill", palette[bar.config] || "#d9a35f");
+      });
+      const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+      g.append("g")
+        .attr("class", "disk-grid")
+        .call(d3.axisLeft(yScale).ticks(4).tickSize(-innerWidth).tickFormat(""))
+        .selectAll("line")
+        .attr("stroke", "#e2e8f0");
+      g.append("g")
+        .attr("class", "disk-axis")
+        .call(d3.axisLeft(yScale).ticks(4).tickFormat((d) => formatMb(Number(d))));
+      g.append("g")
+        .attr("class", "disk-axis")
+        .attr("transform", `translate(0,${innerHeight})`)
+        .call(d3.axisBottom(xScale).tickSizeOuter(0));
+      const groups = g.selectAll(".disk-bar")
+        .data(workload.bars)
+        .join("g")
+        .attr("class", "disk-bar")
+        .attr("transform", (d) => `translate(${xScale(d.config)},0)`);
+      groups.append("rect")
+        .attr("class", "disk-hit")
+        .attr("x", 0)
+        .attr("y", 0)
+        .attr("width", barWidth)
+        .attr("height", innerHeight)
+        .attr("fill", "transparent")
+        .on("pointerenter", function(event, d) { showTooltip(event, { ...d, workload: workload.workload }); })
+        .on("pointermove", function(event, d) { showTooltip(event, { ...d, workload: workload.workload }); })
+        .on("pointerleave", hideTooltip);
+      groups.append("rect")
+        .attr("x", 0)
+        .attr("y", (d) => yScale(d.primary_metric_mb))
+        .attr("width", barWidth)
+        .attr("height", (d) => Math.max(0, innerHeight - yScale(d.primary_metric_mb)))
+        .attr("fill", (d) => {
+          if (!d.fallback) return palette[d.config] || "#7ea6d8";
+          return `url(#disk-pattern-${workload.workload.toLowerCase()}-${d.config.toLowerCase()})`;
+        })
+        .attr("stroke", (d) => palette[d.config] || "#7ea6d8")
+        .attr("stroke-width", 1.2);
+      groups.append("text")
+        .attr("class", "disk-value-label")
+        .attr("x", barWidth / 2)
+        .attr("y", (d) => Math.max(12, yScale(d.primary_metric_mb) - 8))
+        .attr("text-anchor", "middle")
+        .text((d) => formatMb(d.primary_metric_mb));
+    });
+  }
+
+  render();
+  if ("ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => window.requestAnimationFrame(render));
+    observer.observe(chartNode);
+  } else {
+    window.addEventListener("resize", render);
+  }
+})();
+</script>
+""".replace("__PAYLOAD__", payload_json).replace("__LEGEND__", legend_markup).replace(
+        "__SUBTITLE__",
+        subtitle.replace("__COVERAGE__", str(chart_data.get("coverageRuns", 0))).replace("__TOTAL__", str(chart_data.get("totalRuns", 0))),
+    )
+
+
 def _build_memory_section(chart_data: dict[str, Any]) -> str:
     payload_json = json.dumps(chart_data, ensure_ascii=True).replace("</", "<\\/")
     legend_html = []
@@ -1879,6 +2240,7 @@ def _write_html(
     overhead_breakdown_section = _build_overhead_breakdown_section(
         _build_overhead_breakdown_payload(run_df)
     )
+    disk_io_section = _build_disk_io_section(_build_disk_io_payload(run_df))
     memory_section = _build_memory_section(_build_memory_payload(run_df))
     speedup_section = _build_speedup_section(_build_speedup_payload(run_df))
     context = _load_report_context(results_dir)
@@ -2121,7 +2483,7 @@ def _write_html(
   </div>
   <div class="card">
     <h2>Runtime Telemetry</h2>
-    <p class="section-note">Aggregated telemetry from the runtime collector. Surfaces secondary cost signals — GPU pipeline continuity, peak memory pressure, and disk materialization volume — that are not captured in wall-clock timing alone. Bold values indicate the best result for that metric within each workload.</p>
+      <p class="section-note">Aggregated telemetry from the runtime collector. Surfaces secondary cost signals — GPU pipeline continuity, peak memory pressure, and disk footprint — that are not captured in wall-clock timing alone. The disk column uses measured runtime writes when available, otherwise final output bytes. Bold values indicate the best result for that metric within each workload.</p>
     <div class="tel-grid">
       {% for card in tel_cards %}
       <div class="tel-card">
@@ -2154,7 +2516,7 @@ def _write_html(
               <span class="tel-val">{{ "%.0f"|format(cfg["Avg GPU Power (W)"]) }}W</span>
             </div>
             <div class="tel-m">
-              <span class="tel-lbl">Disk Write</span>
+              <span class="tel-lbl">{{ cfg["DiskDisplayLabel"] }}</span>
               <span class="tel-val {{ 'winner' if cfg['BestDisk'] else '' }}">{{ "%.2f"|format(cfg["Disk Write (MB)"]) }}MB</span>
             </div>
             <div class="tel-m">
@@ -2169,6 +2531,7 @@ def _write_html(
     </div>
   </div>
   {{ overhead_breakdown_section | safe }}
+  {{ disk_io_section | safe }}
   {{ memory_section | safe }}
   {{ speedup_section | safe }}
   {% for plot in plots %}
@@ -2196,11 +2559,6 @@ def _write_html(
             "filename": "plots/depth_runtime.png",
             "blurb": "Depth = number of sequential UDF pipeline stages, where each stage does a trivially cheap computation. W0 runtime as a function of chain depth. Slope quantifies the per-crossing overhead tax that accumulates with each additional engine–Python round trip.",
         },
-        {
-            "title": "Disk IO",
-            "filename": "plots/disk_io.png",
-            "blurb": "Bytes written to disk per run, with automatic unit scaling. Values elevated relative to input size indicate intermediate materialization or unnecessary data duplication.",
-        },
     ]
 
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -2210,7 +2568,8 @@ def _write_html(
             plots=plots,
             tel_cards=tel_cards,
             tel_maxes=tel_maxes,
-            overhead_breakdown_section=overhead_breakdown_section,
+        overhead_breakdown_section=overhead_breakdown_section,
+            disk_io_section=disk_io_section,
             memory_section=memory_section,
             speedup_section=speedup_section,
             **context,

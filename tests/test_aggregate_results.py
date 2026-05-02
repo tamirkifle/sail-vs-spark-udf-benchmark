@@ -97,6 +97,9 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert row["Trace Compute (s)"] == 0.25
     assert row["Peak RSS (MB)"] == 321.0
     assert row["Disk Write (MB)"] == 4.0
+    assert row["Measured Runtime Writes (MB)"] == 4.0
+    assert row["Output Materialized (MB)"] == 0.0
+    assert row["Disk Metric Kind"] == "runtime_writes"
     assert row["Trace Events"] == 3
     run_df = aggregate_results._build_run_df(results_dir)
     run_row = run_df.iloc[0]
@@ -107,6 +110,10 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert run_row["InferenceTime_sec"] == 0.25
     assert run_row["UntracedEngineRuntime_sec"] == 0.25
     assert run_row["BoundaryTax_sec"] == 3.5
+    assert run_row["MeasuredDiskWrite_MB"] == 4.0
+    assert run_row["OutputMaterialized_MB"] == 0.0
+    assert run_row["DiskWriteSource"] == "measured"
+    assert bool(run_row["DiskTelemetryAvailable"]) is True
 
     report_dir = results_dir / "report"
     assert (report_dir / "aggregate_runs.csv").exists()
@@ -122,7 +129,10 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert 'id="memory-comparison-data"' in html
     assert 'id="relative-speedups-chart"' in html
     assert 'id="relative-speedups-data"' in html
+    assert 'id="disk-io-chart"' in html
+    assert 'id="disk-io-data"' in html
     assert "Runtime Budget Breakdown" in html
+    assert "Disk Materialization &amp; IO" in html
     assert "Memory Comparison" in html
     assert "Relative Speedups" in html
     assert "Spark's batched path" in html
@@ -140,6 +150,8 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert 'startup: "#7ea6d8"' in html
     assert 'activeGap: "#d38c6a"' in html
     assert 'tail: "#a993cf"' in html
+    assert "Pattern-filled bars indicate fallback output-footprint values" in html
+    assert "disk_io.png" not in html
 
 
 def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -> None:
@@ -175,6 +187,64 @@ def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -
 
     assert len(summary) == 1
     assert (results_dir / "report" / "aggregate.html").exists()
+
+
+def test_aggregate_falls_back_to_output_materialization_without_runtime_disk_telemetry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    results_dir = tmp_path / "results"
+    run_dir = results_dir / "runs" / "w1_C_s1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(aggregate_results, "_run_plot_scripts", lambda *_: None)
+
+    output_dir = run_dir / "output.parquet"
+    output_dir.mkdir()
+    payload = b"x" * 4096
+    (output_dir / "part-0000.parquet").write_bytes(payload)
+
+    _write_json(run_dir / "trace.json", {"traceEvents": []})
+    _write_json(
+        run_dir / "stats.json",
+        {
+            "wall_clock_sec": 0.5,
+            "bytes_written_delta": 0,
+            "mb_written_delta": 0.0,
+            "write_throughput_mb_s": 0.0,
+            "output_rows": 100,
+            "samples": [],
+        },
+    )
+    _write_json(
+        run_dir / "manifest.json",
+        {
+            "run_id": "w1_C_s1",
+            "workload": "w1",
+            "execution": "C",
+            "stats_json": str(run_dir / "stats.json"),
+            "trace_json": str(run_dir / "trace.json"),
+            "output_parquet": str(output_dir),
+            "output_rows": 100,
+            "wall_clock_sec": 0.5,
+        },
+    )
+
+    summary = aggregate_results.aggregate(str(results_dir))
+    row = summary.iloc[0]
+    assert row["Disk Write (MB)"] == round(len(payload) / 1e6, 3)
+    assert row["Measured Runtime Writes (MB)"] == 0.0
+    assert row["Output Materialized (MB)"] == round(len(payload) / 1e6, 3)
+    assert row["Disk Metric Kind"] == "output_materialization"
+
+    run_df = aggregate_results._build_run_df(results_dir)
+    run_row = run_df.iloc[0]
+    assert run_row["MeasuredDiskWrite_MB"] == 0.0
+    assert run_row["OutputMaterialized_MB"] == round(len(payload) / 1e6, 3)
+    assert run_row["DiskWriteSource"] == "output_artifact_fallback"
+    assert bool(run_row["DiskTelemetryAvailable"]) is False
+    assert run_row["WriteThroughput_MBps"] == 0.0
+
+    html = (results_dir / "report" / "aggregate.html").read_text()
+    assert "Measured runtime write telemetry was unavailable" in html
 
 
 def test_summarize_trace_splits_detailed_phases_and_window(tmp_path: Path) -> None:
