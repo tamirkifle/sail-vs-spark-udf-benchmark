@@ -32,6 +32,7 @@ import os
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,36 @@ class MetricsCollector:
 
     DEFAULT_SAMPLE_INTERVAL_SEC = 0.5
     GPU_UTIL_ACTIVE_THRESHOLD = 10    # used for pipeline_continuity calc
+    VLLM_METRIC_ALIASES = {
+        "vllm_gpu_cache_usage_pct": {
+            "vllm:gpu_cache_usage_perc",
+            "vllm_gpu_cache_usage_perc",
+        },
+        "vllm_requests_running": {
+            "vllm:num_requests_running",
+            "vllm_num_requests_running",
+        },
+        "vllm_requests_waiting": {
+            "vllm:num_requests_waiting",
+            "vllm_num_requests_waiting",
+        },
+        "vllm_prompt_tokens_total": {
+            "vllm:prompt_tokens_total",
+            "vllm_prompt_tokens_total",
+        },
+        "vllm_generation_tokens_total": {
+            "vllm:generation_tokens_total",
+            "vllm_generation_tokens_total",
+        },
+        "vllm_request_queue_time_seconds_sum": {
+            "vllm:request_queue_time_seconds_sum",
+            "vllm_request_queue_time_seconds_sum",
+        },
+        "vllm_request_queue_time_seconds_count": {
+            "vllm:request_queue_time_seconds_count",
+            "vllm_request_queue_time_seconds_count",
+        },
+    }
 
     def __init__(
         self,
@@ -64,6 +95,7 @@ class MetricsCollector:
         self._io_start: Any = None   # psutil io counters at start
         self._io_scope: str = "unavailable"
         self._pid = os.getpid()
+        self._vllm_metrics_url = self._build_vllm_metrics_url()
 
     # ── Public API ─────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -154,6 +186,58 @@ class MetricsCollector:
         except Exception:
             return {}
 
+    def _build_vllm_metrics_url(self) -> str | None:
+        base_url = os.environ.get("VLLM_BASE_URL", "").strip()
+        if not base_url:
+            return None
+        return f"{base_url.rstrip('/')}/metrics"
+
+    @classmethod
+    def _parse_prometheus_metrics(cls, text: str) -> dict[str, float]:
+        values_by_name: dict[str, list[float]] = {}
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            metric_name = parts[0].split("{", 1)[0]
+            try:
+                value = float(parts[1])
+            except ValueError:
+                continue
+            values_by_name.setdefault(metric_name, []).append(value)
+
+        parsed: dict[str, float] = {}
+        for output_key, aliases in cls.VLLM_METRIC_ALIASES.items():
+            values = [
+                value
+                for metric_name in aliases
+                for value in values_by_name.get(metric_name, [])
+            ]
+            if not values:
+                continue
+            if output_key in {
+                "vllm_gpu_cache_usage_pct",
+                "vllm_requests_running",
+                "vllm_requests_waiting",
+            }:
+                parsed[output_key] = round(max(values), 6)
+            else:
+                parsed[output_key] = round(sum(values), 6)
+        return parsed
+
+    def _sample_vllm_metrics(self) -> dict[str, float]:
+        if not self._vllm_metrics_url:
+            return {}
+        try:
+            with urllib.request.urlopen(self._vllm_metrics_url, timeout=0.5) as response:
+                text = response.read().decode("utf-8", errors="replace")
+            return self._parse_prometheus_metrics(text)
+        except Exception:
+            return {}
+
     def _get_initial_io_counters(self, psutil: Any, proc: Any) -> tuple[Any, str]:
         try:
             return proc.io_counters(), "process"
@@ -202,6 +286,7 @@ class MetricsCollector:
                 pass
 
             sample.update(self._sample_gpu())
+            sample.update(self._sample_vllm_metrics())
             self._samples.append(sample)
             time.sleep(self.interval)
 
@@ -260,6 +345,11 @@ class MetricsCollector:
             "peak_gpu_mem_used_mb": peak("gpu_mem_used_mb"),
             "avg_gpu_power_w": avg("gpu_power_w"),
             "pipeline_continuity": pipeline_continuity,
+            # vLLM
+            "avg_vllm_gpu_cache_usage_pct": avg("vllm_gpu_cache_usage_pct"),
+            "peak_vllm_gpu_cache_usage_pct": peak("vllm_gpu_cache_usage_pct"),
+            "peak_vllm_requests_running": peak("vllm_requests_running"),
+            "peak_vllm_requests_waiting": peak("vllm_requests_waiting"),
             # Disk
             "bytes_read_delta": int(read_delta),
             "bytes_written_delta": int(write_delta),

@@ -53,9 +53,41 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
             "run_start_wall_ts": 10.0,
             "run_end_wall_ts": 14.0,
             "samples": [
-                {"t_sec": 0.0, "cpu_pct": 10.0, "rss_mb": 290.0, "host_ram_pct": 50.0},
-                {"t_sec": 0.5, "cpu_pct": 15.0, "rss_mb": 300.0, "host_ram_pct": 55.0},
+                {
+                    "t_sec": 0.0,
+                    "cpu_pct": 10.0,
+                    "rss_mb": 290.0,
+                    "host_ram_pct": 50.0,
+                    "gpu_util_pct": 25.0,
+                    "gpu_power_w": 90.0,
+                    "gpu_mem_used_mb": 1024.0,
+                    "gpu_mem_total_mb": 81920.0,
+                    "vllm_gpu_cache_usage_pct": 0.25,
+                    "vllm_requests_running": 1.0,
+                    "vllm_requests_waiting": 0.0,
+                    "vllm_prompt_tokens_total": 128.0,
+                    "vllm_generation_tokens_total": 256.0,
+                },
+                {
+                    "t_sec": 0.5,
+                    "cpu_pct": 15.0,
+                    "rss_mb": 300.0,
+                    "host_ram_pct": 55.0,
+                    "gpu_util_pct": 80.0,
+                    "gpu_power_w": 120.0,
+                    "gpu_mem_used_mb": 1024.0,
+                    "gpu_mem_total_mb": 81920.0,
+                    "vllm_gpu_cache_usage_pct": 0.75,
+                    "vllm_requests_running": 2.0,
+                    "vllm_requests_waiting": 1.0,
+                    "vllm_prompt_tokens_total": 256.0,
+                    "vllm_generation_tokens_total": 512.0,
+                },
             ],
+            "avg_vllm_gpu_cache_usage_pct": 0.5,
+            "peak_vllm_gpu_cache_usage_pct": 0.75,
+            "peak_vllm_requests_running": 2.0,
+            "peak_vllm_requests_waiting": 1.0,
         },
     )
     _write_json(
@@ -132,7 +164,13 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert 'id="relative-speedups-data"' in html
     assert 'id="disk-io-chart"' in html
     assert 'id="disk-io-data"' in html
+    assert 'id="gpu-utilization-chart"' in html
+    assert 'id="gpu-utilization-data"' in html
     assert "Runtime Budget Breakdown" in html
+    assert "GPU Utilization &amp; vLLM Activity" in html
+    assert "gpu_memory_utilization" in html
+    assert "vllm_gpu_cache_usage_pct" in html
+    assert "gpu_util_pct" in html
     assert "Disk Materialization &amp; IO" in html
     assert "Memory Comparison" in html
     assert "Relative Speedups" in html
@@ -153,6 +191,7 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert 'tail: "#a993cf"' in html
     assert "Pattern-filled bars indicate fallback output-footprint values" in html
     assert "disk_io.png" not in html
+    assert "gpu_timeline.png" not in html
 
 
 def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -> None:
@@ -188,6 +227,8 @@ def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -
 
     assert len(summary) == 1
     assert (results_dir / "report" / "aggregate.html").exists()
+    html = (results_dir / "report" / "aggregate.html").read_text()
+    assert "No GPU/vLLM activity samples recorded" in html
 
 
 def test_aggregate_falls_back_to_output_materialization_without_runtime_disk_telemetry(

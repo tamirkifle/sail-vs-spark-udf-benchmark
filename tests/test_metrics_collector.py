@@ -78,3 +78,44 @@ def test_report_can_use_system_disk_scope_without_process_io():
     assert r["bytes_read_delta"] == 40
     assert r["bytes_written_delta"] == 120
     assert r["mb_written_delta"] >= 0.0
+
+
+def test_parse_vllm_prometheus_metrics_keeps_activity_signals():
+    text = """
+# HELP vllm:num_requests_running Number of requests currently running.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="Qwen"} 2
+vllm:num_requests_waiting{model_name="Qwen"} 1
+vllm:gpu_cache_usage_perc{model_name="Qwen",gpu="0"} 0.42
+vllm:prompt_tokens_total{model_name="Qwen"} 128
+vllm:generation_tokens_total{model_name="Qwen"} 256
+vllm:request_queue_time_seconds_sum{model_name="Qwen"} 0.75
+vllm:request_queue_time_seconds_count{model_name="Qwen"} 3
+"""
+    parsed = MetricsCollector._parse_prometheus_metrics(text)
+    assert parsed["vllm_requests_running"] == 2.0
+    assert parsed["vllm_requests_waiting"] == 1.0
+    assert parsed["vllm_gpu_cache_usage_pct"] == 0.42
+    assert parsed["vllm_prompt_tokens_total"] == 128.0
+    assert parsed["vllm_generation_tokens_total"] == 256.0
+    assert parsed["vllm_request_queue_time_seconds_sum"] == 0.75
+    assert parsed["vllm_request_queue_time_seconds_count"] == 3.0
+
+
+def test_report_includes_vllm_summary_fields_from_samples():
+    c = MetricsCollector("vllm-report-test", sample_interval_sec=0.05)
+    c._start_time = time.perf_counter() - 1.0
+    c._end_time = time.perf_counter()
+    c._samples = [
+        {"vllm_gpu_cache_usage_pct": 0.25, "vllm_requests_running": 1.0},
+        {
+            "vllm_gpu_cache_usage_pct": 0.75,
+            "vllm_requests_running": 3.0,
+            "vllm_requests_waiting": 2.0,
+        },
+    ]
+    r = c.report()
+    assert r["avg_vllm_gpu_cache_usage_pct"] == 0.5
+    assert r["peak_vllm_gpu_cache_usage_pct"] == 0.75
+    assert r["peak_vllm_requests_running"] == 3.0
+    assert r["peak_vllm_requests_waiting"] == 2.0

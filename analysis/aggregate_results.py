@@ -94,7 +94,6 @@ TRACE_COMPUTE_PHASES = {
 
 PLOT_SCRIPTS = [
     ("analysis/plot_depth_runtime.py", "depth_runtime.png"),
-    ("analysis/plot_gpu_timeline.py", "gpu_timeline.png"),
 ]
 
 SAIL_SVG = """
@@ -382,6 +381,10 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
         "PeakGPUMemUsed_MB": float(stats.get("peak_gpu_mem_used_mb", 0.0) or 0.0),
         "AvgGPUPower_W": float(stats.get("avg_gpu_power_w", 0.0) or 0.0),
         "PipelineContinuity": float(stats.get("pipeline_continuity", 0.0) or 0.0),
+        "AvgVLLMGPUCacheUsage_pct": float(stats.get("avg_vllm_gpu_cache_usage_pct", 0.0) or 0.0),
+        "PeakVLLMGPUCacheUsage_pct": float(stats.get("peak_vllm_gpu_cache_usage_pct", 0.0) or 0.0),
+        "PeakVLLMRequestsRunning": float(stats.get("peak_vllm_requests_running", 0.0) or 0.0),
+        "PeakVLLMRequestsWaiting": float(stats.get("peak_vllm_requests_waiting", 0.0) or 0.0),
         "MeasuredDiskRead_Bytes": bytes_read_delta,
         "MeasuredDiskRead_MB": round(bytes_read_delta / 1e6, 3),
         "MeasuredDiskWrite_Bytes": measured_bytes_written,
@@ -1455,6 +1458,410 @@ def _build_speedup_payload(run_df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_gpu_utilization_payload(results_dir: Path) -> dict[str, Any]:
+    configs = ["A", "B", "C", "D"]
+    workloads_by_key: dict[str, list[dict[str, Any]]] = {}
+    has_gpu_data = False
+    has_vllm_data = False
+    max_time_sec = 0.0
+
+    for manifest_path in _manifest_paths(results_dir):
+        manifest = _read_json(manifest_path)
+        stats_path = _resolve_artifact_path(
+            manifest_path, manifest, "stats_json", "_stats.json"
+        )
+        if stats_path is None:
+            continue
+        stats = _read_json(stats_path)
+        workload = str(manifest.get("workload", stats.get("workload", ""))).upper()
+        config = str(manifest.get("execution", stats.get("execution", ""))).upper()
+        if not workload or not config:
+            continue
+
+        points: list[dict[str, Any]] = []
+        for sample in stats.get("samples") or []:
+            point = {
+                "t_sec": round(float(sample.get("t_sec", 0.0) or 0.0), 3),
+            }
+            for key in [
+                "gpu_util_pct",
+                "gpu_power_w",
+                "gpu_mem_used_mb",
+                "gpu_mem_total_mb",
+                "vllm_gpu_cache_usage_pct",
+                "vllm_requests_running",
+                "vllm_requests_waiting",
+                "vllm_prompt_tokens_total",
+                "vllm_generation_tokens_total",
+            ]:
+                value = _float_or_none(sample.get(key))
+                if value is not None:
+                    point[key] = round(value, 6)
+            if "gpu_util_pct" in point or "gpu_power_w" in point or "gpu_mem_used_mb" in point:
+                has_gpu_data = True
+            if any(str(key).startswith("vllm_") for key in point):
+                has_vllm_data = True
+            max_time_sec = max(max_time_sec, float(point["t_sec"]))
+            points.append(point)
+
+        def counter_delta(key: str) -> float:
+            values = [
+                float(point[key])
+                for point in points
+                if point.get(key) is not None
+            ]
+            if len(values) < 2:
+                return 0.0
+            return max(0.0, values[-1] - values[0])
+
+        wall_time = float(stats.get("wall_clock_sec", manifest.get("wall_clock_sec", 0.0)) or 0.0)
+        max_time_sec = max(max_time_sec, wall_time)
+        run = {
+            "run_id": str(manifest.get("run_id", stats.get("config", ""))),
+            "workload": workload,
+            "config": config,
+            "label": get_label(config),
+            "depth": manifest.get("depth"),
+            "sample_idx": _parse_sample_idx(str(manifest.get("run_id", stats.get("config", "")))),
+            "wall_sec": round(wall_time, 6),
+            "avg_gpu_util_pct": round(float(stats.get("avg_gpu_util_pct", 0.0) or 0.0), 3),
+            "peak_gpu_util_pct": round(float(stats.get("peak_gpu_util_pct", 0.0) or 0.0), 3),
+            "avg_gpu_power_w": round(float(stats.get("avg_gpu_power_w", 0.0) or 0.0), 3),
+            "peak_gpu_mem_used_mb": round(float(stats.get("peak_gpu_mem_used_mb", 0.0) or 0.0), 3),
+            "pipeline_continuity": round(float(stats.get("pipeline_continuity", 0.0) or 0.0), 3),
+            "avg_vllm_gpu_cache_usage_pct": round(float(stats.get("avg_vllm_gpu_cache_usage_pct", 0.0) or 0.0), 6),
+            "peak_vllm_gpu_cache_usage_pct": round(float(stats.get("peak_vllm_gpu_cache_usage_pct", 0.0) or 0.0), 6),
+            "peak_vllm_requests_running": round(float(stats.get("peak_vllm_requests_running", 0.0) or 0.0), 3),
+            "peak_vllm_requests_waiting": round(float(stats.get("peak_vllm_requests_waiting", 0.0) or 0.0), 3),
+            "vllm_prompt_tokens_delta": round(counter_delta("vllm_prompt_tokens_total"), 3),
+            "vllm_generation_tokens_delta": round(counter_delta("vllm_generation_tokens_total"), 3),
+            "points": points,
+        }
+        workloads_by_key.setdefault(workload, []).append(run)
+
+    workloads = []
+    for workload in sorted(workloads_by_key):
+        runs = sorted(
+            workloads_by_key[workload],
+            key=lambda item: (
+                str(item["config"]),
+                -1 if item["sample_idx"] is None else int(item["sample_idx"]),
+                -1 if item["depth"] is None else int(item["depth"]),
+            ),
+        )
+        sample_indexes = sorted(
+            {
+                int(run["sample_idx"])
+                for run in runs
+                if run.get("sample_idx") is not None
+            }
+        )
+        workloads.append(
+            {
+                "workload": workload,
+                "label": WORKLOAD_LABELS.get(workload, workload),
+                "runs": runs,
+                "sampleIndexes": sample_indexes,
+            }
+        )
+
+    default_workload = ""
+    workload_keys = [item["workload"] for item in workloads]
+    if "W1" in workload_keys:
+        default_workload = "W1"
+    elif workload_keys:
+        default_workload = workload_keys[0]
+
+    return {
+        "configs": [{"code": cfg, "label": get_label(cfg)} for cfg in configs],
+        "workloads": workloads,
+        "defaultWorkload": default_workload,
+        "hasGpuData": has_gpu_data,
+        "hasVllmData": has_vllm_data,
+        "maxTimeSec": round(max_time_sec, 3),
+    }
+
+
+def _build_gpu_utilization_section(chart_data: dict[str, Any]) -> str:
+    payload_json = json.dumps(chart_data, ensure_ascii=True).replace("</", "<\\/")
+    return """
+<div class="card gpu-card">
+  <h2>GPU Utilization &amp; vLLM Activity</h2>
+  <p class="section-note">This D3 view tracks active accelerator work rather than reserved memory. vLLM intentionally occupies memory according to <code>gpu_memory_utilization</code>, so flat GPU memory mostly reflects reserved KV/model capacity; SM utilization, power, queue pressure, token movement, and KV-cache usage are the better activity signals.</p>
+  <script type="application/json" id="gpu-utilization-data">__PAYLOAD__</script>
+  <div class="gpu-controls">
+    <label>Workload <select id="gpu-workload-select"></select></label>
+    <label>Sample <select id="gpu-sample-select"></select></label>
+    <div id="gpu-config-toggles" class="gpu-toggle-row" aria-label="Execution config toggles"></div>
+  </div>
+  <div id="gpu-utilization-chart" class="gpu-chart-shell"></div>
+  <div id="gpu-summary-cards" class="gpu-summary-grid"></div>
+  <p class="gpu-footnote">GPU memory is shown as reserved footprint when present. Treat it as capacity pressure, not as proof of active GPU execution.</p>
+</div>
+<style>
+  .gpu-card { border-color: #dbe7ff; background: linear-gradient(180deg, rgba(255,255,255,0.98), #f8fafc); }
+  .gpu-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0 14px; }
+  .gpu-controls label { display: inline-flex; align-items: center; gap: 8px; color: #334155; font-size: 13px; font-weight: 700; }
+  .gpu-controls select { border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; color: #0f172a; padding: 7px 10px; font: inherit; }
+  .gpu-toggle-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .gpu-toggle { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #dbe7ff; border-radius: 999px; background: #fff; padding: 7px 10px; color: #334155; font-size: 12px; font-weight: 800; }
+  .gpu-toggle input { accent-color: #3762e0; }
+  .gpu-chart-shell { min-height: 340px; border: 1px solid #e2e8f0; border-radius: 16px; background: #fff; padding: 12px; }
+  .gpu-svg { width: 100%; height: auto; display: block; }
+  .gpu-axis text { fill: #475569; font-size: 11px; }
+  .gpu-axis path, .gpu-axis line { stroke: #cbd5e1; }
+  .gpu-grid line { stroke: #e2e8f0; stroke-dasharray: 3 4; }
+  .gpu-run-line { fill: none; stroke-width: 2.4; }
+  .gpu-point { stroke: #fff; stroke-width: 1.2; }
+  .gpu-empty { padding: 22px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #475569; background: #fff; }
+  .gpu-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; color: #475569; font-size: 12px; }
+  .gpu-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .gpu-swatch { width: 12px; height: 12px; border-radius: 999px; display: inline-block; }
+  .gpu-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 12px; }
+  .gpu-summary-card { border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; padding: 12px; }
+  .gpu-summary-card .k { display: block; font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 800; }
+  .gpu-summary-card .v { display: block; color: #0f172a; font-size: 18px; font-weight: 850; margin-top: 4px; }
+  .gpu-summary-card .s { display: block; color: #64748b; font-size: 12px; margin-top: 3px; line-height: 1.35; }
+  .gpu-tooltip { position: fixed; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: rgba(15, 23, 42, 0.96); color: #f8fafc; border-radius: 12px; padding: 10px 12px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22); font-size: 12px; line-height: 1.45; max-width: 280px; }
+  .gpu-tooltip strong { display: block; font-size: 13px; margin-bottom: 4px; color: #fff; }
+  .gpu-tooltip .metric { display: flex; justify-content: space-between; gap: 14px; white-space: nowrap; }
+  .gpu-tooltip .metric span:first-child { color: #cbd5e1; }
+  .gpu-footnote { color: #64748b; font-size: 12px; line-height: 1.45; margin: 10px 0 0; }
+</style>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  const dataNode = document.getElementById("gpu-utilization-data");
+  const chartNode = document.getElementById("gpu-utilization-chart");
+  const cardsNode = document.getElementById("gpu-summary-cards");
+  const workloadSelect = document.getElementById("gpu-workload-select");
+  const sampleSelect = document.getElementById("gpu-sample-select");
+  const togglesNode = document.getElementById("gpu-config-toggles");
+  if (!dataNode || !chartNode || !cardsNode || typeof d3 === "undefined") {
+    return;
+  }
+  const payload = JSON.parse(dataNode.textContent);
+  const colors = { A: "#8a8f98", B: "#e25a1c", C: "#3762e0", D: "#0f9f7a" };
+  const activeConfigs = new Set((payload.configs || []).map((d) => d.code));
+  const tooltip = d3.select("body").selectAll(".gpu-tooltip").data([null]).join("div").attr("class", "gpu-tooltip");
+
+  function fmtPct(value, digits = 0) {
+    return Number.isFinite(value) ? `${value.toFixed(digits)}%` : "-";
+  }
+
+  function fmtPct01(value) {
+    if (!Number.isFinite(value)) return "-";
+    const pct = value <= 1 ? value * 100 : value;
+    return `${pct.toFixed(pct >= 10 ? 0 : 1)}%`;
+  }
+
+  function fmtNumber(value, digits = 1) {
+    return Number.isFinite(value) ? value.toFixed(digits) : "-";
+  }
+
+  function runLabel(run) {
+    const depth = run.depth == null ? "" : ` d${run.depth}`;
+    const sample = run.sample_idx == null ? "" : ` s${run.sample_idx}`;
+    return `${run.config}${depth}${sample}`;
+  }
+
+  function setupControls() {
+    workloadSelect.innerHTML = "";
+    (payload.workloads || []).forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.workload;
+      option.textContent = `${item.workload} · ${item.label}`;
+      workloadSelect.appendChild(option);
+    });
+    if (payload.defaultWorkload) {
+      workloadSelect.value = payload.defaultWorkload;
+    }
+
+    togglesNode.innerHTML = "";
+    (payload.configs || []).forEach((cfg) => {
+      const label = document.createElement("label");
+      label.className = "gpu-toggle";
+      label.innerHTML = `<input type="checkbox" value="${cfg.code}" checked><span style="color:${colors[cfg.code] || "#334155"}">${cfg.code}</span><span>${cfg.label}</span>`;
+      label.querySelector("input").addEventListener("change", (event) => {
+        if (event.target.checked) activeConfigs.add(cfg.code);
+        else activeConfigs.delete(cfg.code);
+        render();
+      });
+      togglesNode.appendChild(label);
+    });
+    workloadSelect.addEventListener("change", () => {
+      syncSampleOptions();
+      render();
+    });
+    sampleSelect.addEventListener("change", render);
+    syncSampleOptions();
+  }
+
+  function selectedWorkload() {
+    return (payload.workloads || []).find((item) => item.workload === workloadSelect.value) || (payload.workloads || [])[0];
+  }
+
+  function syncSampleOptions() {
+    const workload = selectedWorkload();
+    sampleSelect.innerHTML = "";
+    const all = document.createElement("option");
+    all.value = "all";
+    all.textContent = "All samples";
+    sampleSelect.appendChild(all);
+    ((workload && workload.sampleIndexes) || []).forEach((idx) => {
+      const option = document.createElement("option");
+      option.value = String(idx);
+      option.textContent = `Sample ${idx}`;
+      sampleSelect.appendChild(option);
+    });
+  }
+
+  function selectedRuns() {
+    const workload = selectedWorkload();
+    if (!workload) return [];
+    const sampleValue = sampleSelect.value;
+    return workload.runs.filter((run) => {
+      if (!activeConfigs.has(run.config)) return false;
+      if (sampleValue !== "all" && String(run.sample_idx) !== sampleValue) return false;
+      return true;
+    });
+  }
+
+  function showTooltip(event, run, point) {
+    tooltip.style("opacity", 1).html(`
+      <strong>${run.workload} · ${runLabel(run)}</strong>
+      <div class="metric"><span>t</span><span>${fmtNumber(point.t_sec, 2)}s</span></div>
+      <div class="metric"><span>SM util</span><span>${fmtPct(point.gpu_util_pct, 0)}</span></div>
+      <div class="metric"><span>GPU power</span><span>${fmtNumber(point.gpu_power_w, 1)}W</span></div>
+      <div class="metric"><span>vLLM KV cache</span><span>${fmtPct01(point.vllm_gpu_cache_usage_pct)}</span></div>
+      <div class="metric"><span>Running / waiting</span><span>${fmtNumber(point.vllm_requests_running, 0)} / ${fmtNumber(point.vllm_requests_waiting, 0)}</span></div>
+      <div class="metric"><span>Prompt / decode tokens</span><span>${fmtNumber(point.vllm_prompt_tokens_total, 0)} / ${fmtNumber(point.vllm_generation_tokens_total, 0)}</span></div>
+    `);
+    const rect = tooltip.node().getBoundingClientRect();
+    let left = event.clientX + 16;
+    let top = event.clientY + 16;
+    if (left + rect.width + 18 > window.innerWidth) left = event.clientX - rect.width - 16;
+    if (top + rect.height + 18 > window.innerHeight) top = event.clientY - rect.height - 16;
+    tooltip.style("left", `${Math.max(8, left)}px`).style("top", `${Math.max(8, top)}px`);
+  }
+
+  function renderCards(runs) {
+    cardsNode.innerHTML = "";
+    if (!runs.length) return;
+    const bestContinuity = d3.max(runs, (d) => d.pipeline_continuity) || 0;
+    const bestPeak = d3.max(runs, (d) => d.peak_gpu_util_pct) || 0;
+    const bestKv = d3.max(runs, (d) => d.peak_vllm_gpu_cache_usage_pct) || 0;
+    const maxTokenDelta = d3.max(runs, (d) => (d.vllm_prompt_tokens_delta || 0) + (d.vllm_generation_tokens_delta || 0)) || 0;
+    const cards = [
+      { k: "Best continuity", v: fmtPct01(bestContinuity), s: "Share of GPU samples above active-util threshold." },
+      { k: "Peak SM util", v: fmtPct(bestPeak, 0), s: "Burst ceiling from nvidia-smi utilization.gpu." },
+      { k: "Peak vLLM KV cache", v: bestKv ? fmtPct01(bestKv) : "-", s: payload.hasVllmData ? "Cache pressure inside vLLM reserved memory." : "vLLM /metrics unavailable." },
+      { k: "Max queue pressure", v: fmtNumber(d3.max(runs, (d) => d.peak_vllm_requests_waiting) || 0, 0), s: "Peak waiting requests from vLLM scheduler metrics." },
+      { k: "Max token movement", v: fmtNumber(maxTokenDelta, 0), s: "Prompt + decode token counter delta within a run." },
+    ];
+    cards.forEach((card) => {
+      const node = document.createElement("div");
+      node.className = "gpu-summary-card";
+      node.innerHTML = `<span class="k">${card.k}</span><span class="v">${card.v}</span><span class="s">${card.s}</span>`;
+      cardsNode.appendChild(node);
+    });
+  }
+
+  function render() {
+    const runs = selectedRuns();
+    chartNode.innerHTML = "";
+    renderCards(runs);
+    if (!payload.workloads || payload.workloads.length === 0) {
+      chartNode.innerHTML = '<div class="gpu-empty">No benchmark runs were found for GPU utilization.</div>';
+      return;
+    }
+    const lineRuns = runs.map((run) => ({
+      run,
+      points: (run.points || []).filter((point) => Number.isFinite(point.gpu_util_pct)),
+    })).filter((item) => item.points.length > 0);
+    if (!lineRuns.length) {
+      chartNode.innerHTML = payload.hasVllmData
+        ? '<div class="gpu-empty">vLLM activity metrics were recorded, but no GPU SM utilization samples were available for this selection.</div>'
+        : '<div class="gpu-empty">No GPU/vLLM activity samples recorded for this selection.</div>';
+      return;
+    }
+
+    const width = chartNode.getBoundingClientRect().width || 960;
+    const height = 340;
+    const margin = { top: 20, right: 30, bottom: 42, left: 58 };
+    const innerWidth = Math.max(220, width - margin.left - margin.right);
+    const innerHeight = height - margin.top - margin.bottom;
+    const maxT = d3.max(lineRuns.flatMap((item) => item.points), (d) => d.t_sec) || 1;
+    const x = d3.scaleLinear().domain([0, Math.max(1, maxT)]).range([0, innerWidth]);
+    const y = d3.scaleLinear().domain([0, 100]).range([innerHeight, 0]);
+    const line = d3.line().x((d) => x(d.t_sec)).y((d) => y(d.gpu_util_pct)).curve(d3.curveMonotoneX);
+    const svg = d3.select(chartNode).append("svg")
+      .attr("class", "gpu-svg")
+      .attr("viewBox", `0 0 ${width} ${height}`)
+      .attr("role", "img")
+      .attr("aria-label", "GPU SM utilization timeline by benchmark run");
+    const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+    g.append("g")
+      .attr("class", "gpu-grid")
+      .call(d3.axisLeft(y).tickValues([0, 25, 50, 75, 100]).tickSize(-innerWidth).tickFormat(""))
+      .selectAll("line")
+      .attr("stroke", "#e2e8f0");
+    g.append("g").attr("class", "gpu-axis").call(d3.axisLeft(y).tickValues([0, 25, 50, 75, 100]).tickFormat((d) => `${d}%`));
+    g.append("g").attr("class", "gpu-axis").attr("transform", `translate(0,${innerHeight})`).call(d3.axisBottom(x).ticks(6).tickFormat((d) => `${d}s`));
+    g.append("text").attr("x", innerWidth / 2).attr("y", innerHeight + 36).attr("text-anchor", "middle").attr("fill", "#64748b").attr("font-size", 12).text("Wall-clock seconds since run start");
+    g.append("text").attr("transform", "rotate(-90)").attr("x", -innerHeight / 2).attr("y", -42).attr("text-anchor", "middle").attr("fill", "#64748b").attr("font-size", 12).text("GPU SM utilization");
+
+    const groups = g.selectAll(".gpu-run").data(lineRuns).join("g").attr("class", "gpu-run");
+    groups.append("path")
+      .attr("class", "gpu-run-line")
+      .attr("stroke", (d) => colors[d.run.config] || "#334155")
+      .attr("opacity", 0.86)
+      .attr("d", (d) => line(d.points));
+    groups.selectAll("circle")
+      .data((d) => d.points.map((point) => ({ point, run: d.run })))
+      .join("circle")
+      .attr("class", "gpu-point")
+      .attr("cx", (d) => x(d.point.t_sec))
+      .attr("cy", (d) => y(d.point.gpu_util_pct))
+      .attr("r", 3.2)
+      .attr("fill", (d) => colors[d.run.config] || "#334155")
+      .on("pointerenter", (event, d) => showTooltip(event, d.run, d.point))
+      .on("pointermove", (event, d) => showTooltip(event, d.run, d.point))
+      .on("pointerleave", () => tooltip.style("opacity", 0));
+
+    const legend = document.createElement("div");
+    legend.className = "gpu-legend";
+    lineRuns.forEach((item) => {
+      const row = document.createElement("span");
+      row.className = "gpu-legend-item";
+      row.innerHTML = `<span class="gpu-swatch" style="background:${colors[item.run.config] || "#334155"}"></span>${runLabel(item.run)} · continuity ${fmtPct01(item.run.pipeline_continuity)}`;
+      legend.appendChild(row);
+    });
+    chartNode.appendChild(legend);
+  }
+
+  setupControls();
+  render();
+  if ("ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => window.requestAnimationFrame(render));
+    observer.observe(chartNode);
+  } else {
+    window.addEventListener("resize", render);
+  }
+})();
+</script>
+""".replace("__PAYLOAD__", payload_json)
+
+
 def _build_disk_io_payload(run_df: pd.DataFrame) -> dict[str, Any]:
     configs = ["A", "B", "C", "D"]
     if run_df.empty:
@@ -2272,6 +2679,9 @@ def _write_html(
     disk_io_section = _build_disk_io_section(_build_disk_io_payload(run_df))
     memory_section = _build_memory_section(_build_memory_payload(run_df))
     speedup_section = _build_speedup_section(_build_speedup_payload(run_df))
+    gpu_utilization_section = _build_gpu_utilization_section(
+        _build_gpu_utilization_payload(results_dir)
+    )
     context = _load_report_context(results_dir)
 
     template = Template(
@@ -2559,6 +2969,7 @@ def _write_html(
       {% endfor %}
     </div>
   </div>
+  {{ gpu_utilization_section | safe }}
   {{ overhead_breakdown_section | safe }}
   {{ disk_io_section | safe }}
   {{ memory_section | safe }}
@@ -2579,11 +2990,6 @@ def _write_html(
 
     plots = [
         {
-            "title": "GPU Timeline",
-            "filename": "plots/gpu_timeline.png",
-            "blurb": "GPU utilization over time, per configuration. Gaps between compute bursts indicate scheduling or data-transfer stalls that limit accelerator efficiency.",
-        },
-        {
             "title": "Depth Runtime",
             "filename": "plots/depth_runtime.png",
             "blurb": "Depth = number of sequential UDF pipeline stages, where each stage does a trivially cheap computation. W0 runtime as a function of chain depth. Slope quantifies the per-crossing overhead tax that accumulates with each additional engine–Python round trip.",
@@ -2597,7 +3003,8 @@ def _write_html(
             plots=plots,
             tel_cards=tel_cards,
             tel_maxes=tel_maxes,
-        overhead_breakdown_section=overhead_breakdown_section,
+            gpu_utilization_section=gpu_utilization_section,
+            overhead_breakdown_section=overhead_breakdown_section,
             disk_io_section=disk_io_section,
             memory_section=memory_section,
             speedup_section=speedup_section,
