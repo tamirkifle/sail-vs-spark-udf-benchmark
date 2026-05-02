@@ -66,7 +66,9 @@ def test_cpu_real_setup_avoids_vllm_install_path() -> None:
     cpu_real_block = setup.split('if [[ "$MODE" == "cpu_real" ]]; then', 1)[1]
     cpu_real_block = cpu_real_block.split('elif [[ "$MODE" == "cpu" || "$MODE" == "gpu" ]]; then', 1)[0]
 
-    assert "transformers sentence-transformers accelerate" in cpu_real_block
+    assert '"transformers>=4.51.0"' in cpu_real_block
+    assert '"sentence-transformers>=3.0.0"' in cpu_real_block
+    assert '"accelerate>=0.26.0"' in cpu_real_block
     assert "vllm" not in cpu_real_block.lower()
 
 

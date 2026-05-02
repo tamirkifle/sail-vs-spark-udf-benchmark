@@ -23,6 +23,15 @@ Spark requires Java 17 or newer. `submit_cpu_real_models.sh` prints the selected
 `java` path and `java -version`, then exits before running benchmarks if Java is
 too old.
 
+The submit script also prints the `transformers` version and import path. If it
+reports that `AutoModelForCausalLM` is missing, refresh the venv on a node with
+package access:
+
+```bash
+.venv/bin/python -m pip install --upgrade \
+  "transformers>=4.51.0" "sentence-transformers>=3.0.0" "accelerate>=0.26.0"
+```
+
 ## Offline Compute Nodes
 
 By default, `submit_cpu_real_models.sh` sets `FORCE_SYNTHETIC=1` so dataset prep

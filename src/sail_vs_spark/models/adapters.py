@@ -8,6 +8,30 @@ from .compat import model_cache_dir, resolve_model_path
 from ..profiling.boundary_timer import optional_measure
 
 
+def _transformers_attr(name: str) -> Any:
+    import importlib
+    import transformers
+
+    value = getattr(transformers, name, None)
+    if value is not None:
+        return value
+
+    try:
+        auto_module = importlib.import_module("transformers.models.auto")
+        value = getattr(auto_module, name, None)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+
+    version = getattr(transformers, "__version__", "unknown")
+    path = getattr(transformers, "__file__", "unknown")
+    raise ImportError(
+        f"transformers {version} at {path} does not provide {name}; "
+        "install transformers>=4.51.0 in the benchmark venv"
+    )
+
+
 class _VLLMGenerator:
     """Calls a running vLLM OpenAI-compatible server via stdlib urllib."""
 
@@ -115,7 +139,9 @@ class _HFGenerator:
         timer=None,
     ) -> None:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        AutoModelForCausalLM = _transformers_attr("AutoModelForCausalLM")
+        AutoTokenizer = _transformers_attr("AutoTokenizer")
 
         model_name = resolve_model_path(model_id)
         cache_dir = str(model_cache_dir())
@@ -223,7 +249,11 @@ class _HFScorer:
         timer=None,
     ) -> None:
         import torch
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+        AutoModelForSequenceClassification = _transformers_attr(
+            "AutoModelForSequenceClassification"
+        )
+        AutoTokenizer = _transformers_attr("AutoTokenizer")
 
         model_name = resolve_model_path(model_id)
         cache_dir = str(model_cache_dir())

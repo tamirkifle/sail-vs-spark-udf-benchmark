@@ -74,9 +74,9 @@ PY="$VENV/bin/python"
 
 if [[ "$MODE" == "cpu_real" ]]; then
   "$PY" -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-  "$PY" -m pip install transformers sentence-transformers accelerate
+  "$PY" -m pip install "transformers>=4.51.0" "sentence-transformers>=3.0.0" "accelerate>=0.26.0"
 elif [[ "$MODE" == "cpu" || "$MODE" == "gpu" ]]; then
-  "$PY" -m pip install torch transformers sentence-transformers accelerate
+  "$PY" -m pip install torch "transformers>=4.51.0" "sentence-transformers>=3.0.0" "accelerate>=0.26.0"
 fi
 
 if [[ "$MODE" == "gpu" ]]; then

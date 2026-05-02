@@ -66,6 +66,35 @@ if [ ! -d "$VENV" ]; then
     exit 1
 fi
 
+"$VENV/bin/python" - <<'PY'
+import importlib
+import sys
+
+import transformers
+
+version = getattr(transformers, "__version__", "unknown")
+path = getattr(transformers, "__file__", "unknown")
+print(f"[slurm] transformers={version} path={path}")
+
+def require_transformers_attr(name: str) -> None:
+    if getattr(transformers, name, None) is not None:
+        return
+    try:
+        auto_module = importlib.import_module("transformers.models.auto")
+    except Exception as exc:
+        raise SystemExit(
+            f"Error: cannot import transformers.models.auto while checking {name}: {exc}"
+        )
+    if getattr(auto_module, name, None) is None:
+        raise SystemExit(
+            f"Error: transformers {version} does not provide {name}. "
+            "Re-run scripts/setup_env.sh --mode cpu_real --venv .venv with transformers>=4.51.0."
+        )
+
+for attr in ("AutoTokenizer", "AutoModelForCausalLM", "AutoModelForSequenceClassification"):
+    require_transformers_attr(attr)
+PY
+
 SAIL_REPO_DIR="$REPO_DIR/third_party/sail"
 if [ -d "$SAIL_REPO_DIR" ]; then
     echo "Building Sail v0.6.0 on compute node..."
