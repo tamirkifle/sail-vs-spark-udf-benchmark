@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .adapters import _HFGenerator, _HFScorer, _STEmbedder, _VLLMGenerator
+from .adapters import _HFScorer, _STEmbedder, _VLLMGenerator
 from .device import hf_available, resolve_device, torch_available
 from .mock import MockEmbedder, MockGenerator, MockScorer
 
@@ -22,40 +22,29 @@ def get_generator(cfg: dict) -> Any:
     prefer_mock = cfg.get("prefer_mock", False)
     allow_mock = cfg.get("allow_mock", True)
 
-    if not prefer_mock:
-        server_url = cfg.get("server_url") or os.environ.get("VLLM_BASE_URL", "")
-        if server_url:
-            try:
-                _GENERATOR = _VLLMGenerator(
-                    server_url=server_url,
-                    model_id=cfg["name"],
-                    max_new_tokens=cfg.get("max_new_tokens", 128),
-                    temperature=cfg.get("temperature", 0.7),
-                    top_p=cfg.get("top_p", 0.9),
-                    top_k=cfg.get("top_k", 50),
-                )
-                print(f"[loaders] Using vLLM generator at {server_url}")
-                return _GENERATOR
-            except Exception as exc:
-                if not allow_mock:
-                    raise
-                print(f"[loaders] vLLM Generator fell back ({exc})")
+    server_url = cfg.get("server_url") or os.environ.get("VLLM_BASE_URL", "")
+    if not prefer_mock and server_url:
+        try:
+            _GENERATOR = _VLLMGenerator(
+                server_url=server_url,
+                model_id=cfg["name"],
+                max_new_tokens=cfg.get("max_new_tokens", 128),
+                temperature=cfg.get("temperature", 0.7),
+                top_p=cfg.get("top_p", 0.9),
+                top_k=cfg.get("top_k", 50),
+            )
+            print(f"[loaders] Using vLLM generator at {server_url}")
+            return _GENERATOR
+        except Exception as exc:
+            if not allow_mock:
+                raise
+            print(f"[loaders] vLLM Generator fell back ({exc})")
 
-        device = resolve_device(cfg.get("device", "auto"), "Generator")
-        if hf_available() and torch_available():
-            try:
-                _GENERATOR = _HFGenerator(
-                    model_id=cfg["name"],
-                    device=device,
-                    max_new_tokens=cfg.get("max_new_tokens", 32),
-                    temperature=cfg.get("temperature", 0.7),
-                    dtype=cfg.get("dtype"),
-                )
-                return _GENERATOR
-            except Exception as exc:
-                if not allow_mock:
-                    raise
-                print(f"[loaders] Generator fell back to mock ({exc})")
+    if not allow_mock and not prefer_mock:
+        raise RuntimeError(
+            "real generation requires a vLLM server_url or VLLM_BASE_URL; "
+            "set prefer_mock=true for local smoke runs"
+        )
 
     _GENERATOR = MockGenerator(seed=cfg.get("seed", 0))
     return _GENERATOR

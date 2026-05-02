@@ -2,7 +2,7 @@
 
 Usage
 ─────
-    python scripts/prep_dataset.py --config config/laptop.yaml
+    python scripts/prep_dataset.py --config config/cpu.yaml
     python scripts/prep_dataset.py --config config/gpu_h200.yaml --force-synthetic
 """
 

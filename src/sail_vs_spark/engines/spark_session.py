@@ -58,9 +58,16 @@ def build_spark_session(cfg: dict[str, Any]) -> Any:
 
         # Forward HuggingFace cache and offline flags to workers
         .config("spark.executorEnv.HF_HOME", os.environ.get("HF_HOME", ""))
+        .config("spark.executorEnv.HF_HUB_CACHE", os.environ.get("HF_HUB_CACHE", ""))
+        .config(
+            "spark.executorEnv.SENTENCE_TRANSFORMERS_HOME",
+            os.environ.get("SENTENCE_TRANSFORMERS_HOME", ""),
+        )
         .config("spark.executorEnv.HF_HUB_OFFLINE", "1")
         .config("spark.executorEnv.TRANSFORMERS_OFFLINE", "1")
         .config("spark.executorEnv.HF_DATASETS_OFFLINE", "1")
+        .config("spark.python.worker.faulthandler.enabled", "true")
+        .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
 
         # Tight-ish memory so spills surface in disk I/O metrics
         .config("spark.driver.memory", "2g")

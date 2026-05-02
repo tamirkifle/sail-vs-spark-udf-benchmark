@@ -2,7 +2,7 @@
 # Goal: catch regressions before committing to a full H200 run.
 #
 # Usage:
-#   CONFIG=config/gpu_v100_smoke.yaml bash scripts/run_all_gpu.sh
+#   CONFIG=config/gpu_v100_smoke.yaml scripts/run_benchmark.sh --mode gpu --venv .venv_gpu
 #
 # What "minimal" means here:
 #   - 10 rows, 2 partitions  → each partition gets 5 rows; verifies partitioning
@@ -68,6 +68,9 @@ workloads:
     reward_threshold: 0.5
     n_candidates: 1
     batch_size: 4
+
+execution:
+  configs: [A, B, C, D]
 
 runner:
   sail_remote_url: "sc://localhost:50051"

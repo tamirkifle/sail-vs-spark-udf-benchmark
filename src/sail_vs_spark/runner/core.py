@@ -13,18 +13,23 @@ from sail_vs_spark.execution.registry import run_workload
 
 @dataclass(frozen=True)
 class RunArtifacts:
+    run_dir: Path
     output_parquet: str
     stats_json: str
     manifest_json: str
     trace_json: str
+    nvidia_dmon_log: str
 
     @classmethod
     def for_run(cls, results_dir: Path, run_id: str) -> "RunArtifacts":
+        run_dir = results_dir / "runs" / run_id
         return cls(
-            output_parquet=str(results_dir / f"{run_id}_output.parquet"),
-            stats_json=str(results_dir / f"{run_id}_stats.json"),
-            manifest_json=str(results_dir / f"{run_id}_manifest.json"),
-            trace_json=str(results_dir / f"{run_id}_trace.json"),
+            run_dir=run_dir,
+            output_parquet=str(run_dir / "output.parquet"),
+            stats_json=str(run_dir / "stats.json"),
+            manifest_json=str(run_dir / "manifest.json"),
+            trace_json=str(run_dir / "trace.json"),
+            nvidia_dmon_log=str(run_dir / "nvidia_dmon.log"),
         )
 
 
@@ -68,12 +73,14 @@ def execute_run(
 
     parquet_path = resolve_prompts_parquet(cfg)
     artifacts = RunArtifacts.for_run(results_dir, run_id)
+    artifacts.run_dir.mkdir(parents=True, exist_ok=True)
     depth = workload_depth(cfg, workload)
 
     n_rows = None
     collector = MetricsCollector(
         run_id,
         sample_interval_sec=cfg.get("runner", {}).get("sample_interval_sec", 0.5),
+        nvidia_dmon_path=artifacts.nvidia_dmon_log,
     )
     collector.start()
     t0 = time.perf_counter()

@@ -51,9 +51,10 @@ def test_run_one_config_a_w0(mini_cfg, tmp_path):
     assert man["execution"] == "A"
     assert man["output_rows"] == 10
     # Manifest + stats files exist
-    assert (rdir / "smoke_w0_A_manifest.json").exists()
-    assert (rdir / "smoke_w0_A_stats.json").exists()
-    stats = json.loads((rdir / "smoke_w0_A_stats.json").read_text())
+    run_dir = rdir / "runs" / "smoke_w0_A"
+    assert (run_dir / "manifest.json").exists()
+    assert (run_dir / "stats.json").exists()
+    stats = json.loads((run_dir / "stats.json").read_text())
     assert stats["wall_clock_sec"] > 0
     assert "pipeline_continuity" in stats
 

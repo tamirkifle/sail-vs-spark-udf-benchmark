@@ -1,0 +1,53 @@
+# Fast local smoke config. Runs anywhere with the base Python dependencies.
+
+profile: mock
+hardware:
+  device: cpu
+  num_partitions: auto
+
+dataset:
+  source: synthetic
+  n_rows: 20
+  out_dir: data/mock
+
+models:
+  generator:
+    name: mock-generator
+    prefer_mock: true
+    allow_mock: true
+    max_new_tokens: 8
+  scorer:
+    name: mock-scorer
+    prefer_mock: true
+    allow_mock: true
+  embedder:
+    name: mock-embedder
+    prefer_mock: true
+    allow_mock: true
+    dim: 16
+
+workloads:
+  w0_chained:
+    depths: [1]
+    batch_size: 20
+  w1_best_of_n:
+    n_candidates: 2
+    batch_size: 8
+  w2_batched:
+    batch_size: 8
+  w3_embedding:
+    batch_size: 20
+    n_queries: 3
+  w4_agentic:
+    max_iterations: 1
+    reward_threshold: 0.5
+    n_candidates: 1
+    batch_size: 8
+
+execution:
+  configs: [A, B]
+
+runner:
+  sample_interval_sec: 0.5
+  results_dir: results/mock
+  iterations: 1

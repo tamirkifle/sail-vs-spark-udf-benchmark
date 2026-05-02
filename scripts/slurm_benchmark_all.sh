@@ -23,15 +23,18 @@ mkdir -p logs
 
 # Single environment variable cascaded through all runs
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export HF_HOME="${HF_HOME:-/scratch/yirga.t/.cache/huggingface}"
+export MODELS_DIR="${MODELS_DIR:-$(pwd)/models}"
+export HF_HOME="${HF_HOME:-$MODELS_DIR}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$MODELS_DIR/hub}"
+export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-$MODELS_DIR}"
 export VENV="$HOME/.conda/envs/sail"
 
 echo "[slurm] node=$(hostname) gpus=$CUDA_VISIBLE_DEVICES start=$(date -Iseconds)"
 nvidia-smi || true
 
+RESULTS_DIR="${RESULTS_DIR:-results/gpu/$(date +%Y%m%d_%H%M%S)}"
+export RESULTS_DIR
 bash scripts/run_all_gpu.sh
-
 echo "[slurm] done=$(date -Iseconds)"
-python analysis/aggregate_results.py --results_dir results/gpu
 echo "[slurm] aggregated. Copy results back with:"
-echo "       scp -r yirga.t@discovery.northeastern.edu:$(pwd)/results/gpu ~/Documents/MyCode/LakeSail/benchmark_results/"
+echo "       scp -r yirga.t@discovery.northeastern.edu:$(pwd)/$RESULTS_DIR ~/Documents/MyCode/LakeSail/benchmark_results/"

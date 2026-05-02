@@ -14,28 +14,38 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from itertools import islice
 from typing import Any
+
+
+def _prompt_column(row_or_columns: Any) -> str:
+    columns = row_or_columns.keys() if isinstance(row_or_columns, dict) else row_or_columns
+    for col in ("prompt", "instruction", "question"):
+        if col in columns:
+            return col
+    raise ValueError(
+        "dataset missing expected column (prompt/instruction/question); "
+        f"have {list(columns)}"
+    )
 
 
 def _load_from_hf(source: str, split: str, n_rows: int) -> list[dict[str, Any]]:
     from datasets import load_dataset
+
+    # Streaming avoids materializing the full UltraFeedback dataset for small
+    # laptop runs. The non-streaming builder needs >1 GiB before slicing.
+    rows: list[dict[str, Any]] = []
+    for i, row in enumerate(islice(load_dataset(source, split=split, streaming=True), n_rows)):
+        col = _prompt_column(row)
+        rows.append({"prompt_id": i, "prompt_text": str(row[col])})
+
+    if rows:
+        return rows
+
     ds = load_dataset(source, split=split)
-    # UltraFeedback has "instruction" or "prompt" depending on version
-    col = None
-    for c in ("prompt", "instruction", "question"):
-        if c in ds.column_names:
-            col = c
-            break
-    if col is None:
-        raise ValueError(
-            f"UltraFeedback dataset missing expected column "
-            f"(prompt/instruction/question); have {ds.column_names}"
-        )
+    col = _prompt_column(ds.column_names)
     take = min(n_rows, len(ds))
-    return [
-        {"prompt_id": i, "prompt_text": str(ds[i][col])}
-        for i in range(take)
-    ]
+    return [{"prompt_id": i, "prompt_text": str(ds[i][col])} for i in range(take)]
 
 
 
@@ -108,8 +118,11 @@ def prepare(
             rows = _load_from_hf(source, split, n_rows)
             used_source = source
         except Exception as e:
-            print(f"[dataset] HF load failed ({e.__class__.__name__}: {e}); "
-                  f"falling back to synthetic data")
+            cause = e.__cause__ or e.__context__
+            detail = f"{e.__class__.__name__}: {e}"
+            if cause is not None:
+                detail += f" | cause={cause.__class__.__name__}: {cause}"
+            print(f"[dataset] HF load failed ({detail}); falling back to synthetic data")
             rows = _synthetic_rows(n_rows)
             used_source = "synthetic"
 

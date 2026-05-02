@@ -3,8 +3,8 @@
 
 profile: laptop
 hardware:
-  device: auto                 # "cpu" | "mps" | "cuda" | "auto"
-  num_partitions: auto         # automatically resolves to SLURM cores or os.cpu_count()
+  device: cpu                  # "cpu" | "mps" | "cuda" | "auto"
+  num_partitions: 2
 
 dataset:
   source: openbmb/UltraFeedback
@@ -16,22 +16,23 @@ dataset:
   out_dir: data/laptop
 
 models:
-  # Generator, scorer, embedder selections match what the spec asks for
-  # at the Milestone-1 tier. All three are small enough to run on a
-  # MacBook CPU or Apple MPS.
+  # Laptop runs prioritize wiring and overhead shape. Real generation now
+  # requires vLLM; local smoke uses the deterministic mock generator.
   generator:
     name: Qwen/Qwen2.5-0.5B-Instruct
     max_new_tokens: 32
     temperature: 0.7
-    allow_mock: true          # enforce real model
+    prefer_mock: true
+    allow_mock: true
   scorer:
-    # Small reward model for testing
-    name: OpenAssistant/reward-model-deberta-v3-large-v2
-    prefer_mock: false         # load real reward model
-    allow_mock: true          # enforce real model
+    name: mock-scorer
+    prefer_mock: true
+    allow_mock: true           # allow fallback when local deps/models are absent
   embedder:
-    name: sentence-transformers/all-MiniLM-L6-v2
-    allow_mock: false          # enforce real model
+    name: mock-embedder
+    prefer_mock: true
+    allow_mock: true
+    dim: 64
 
 workloads:
   w0_chained:

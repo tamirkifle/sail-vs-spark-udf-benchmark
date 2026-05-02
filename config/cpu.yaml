@@ -1,0 +1,57 @@
+# CPU / Apple Silicon config. Uses deterministic mock models by default so
+# local Spark workers do not each load large HF models or touch MPS.
+
+profile: cpu
+hardware:
+  device: cpu
+  num_partitions: 2
+
+dataset:
+  source: openbmb/UltraFeedback
+  split: train
+  n_rows: 100
+  out_dir: data/cpu
+
+models:
+  generator:
+    name: mock-generator
+    prefer_mock: true
+    allow_mock: true
+    max_new_tokens: 32
+    temperature: 0.7
+  scorer:
+    name: mock-scorer
+    prefer_mock: true
+    allow_mock: true
+  embedder:
+    name: mock-embedder
+    prefer_mock: true
+    allow_mock: true
+    dim: 64
+
+workloads:
+  w0_chained:
+    depths: [1, 2, 3]
+    batch_size: 32
+  w1_best_of_n:
+    n_candidates: 4
+    batch_size: 8
+  w2_batched:
+    batch_size: 8
+  w3_embedding:
+    batch_size: 16
+    n_queries: 5
+  w4_agentic:
+    max_iterations: 2
+    reward_threshold: 0.5
+    n_candidates: 2
+    batch_size: 8
+
+execution:
+  configs: [A, B, C, D]
+
+runner:
+  sail_remote_url: "sc://localhost:50051"
+  sample_interval_sec: 0.5
+  results_dir: results/cpu
+  iterations: 3

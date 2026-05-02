@@ -14,6 +14,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
+def _manifest_paths(rdir: Path) -> list[Path]:
+    paths = set(rdir.glob("*_manifest.json"))
+    paths.update(rdir.glob("runs/*/manifest.json"))
+    return sorted(paths)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--results_dir", required=True)
@@ -25,7 +31,7 @@ def main() -> int:
 
     # { execution -> [(depth, wall_clock_sec), ...] }
     data: dict[str, list[tuple[int, float]]] = defaultdict(list)
-    for man in sorted(rdir.glob("*_manifest.json")):
+    for man in _manifest_paths(rdir):
         m = json.loads(man.read_text())
         if m.get("workload") != "w0":
             continue
@@ -46,7 +52,8 @@ def main() -> int:
     ax.set_ylabel("Wall clock (seconds)")
     ax.set_title("W0 — runtime vs chained-UDF depth")
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    if data:
+        ax.legend()
     fig.tight_layout()
     fig.savefig(out, dpi=140)
     print(f"[plot_depth_runtime] wrote {out}")

@@ -23,6 +23,18 @@ def get_label(cfg):
     }
     return labels.get(cfg, cfg)
 
+
+def _stats_paths(rdir: Path) -> list[Path]:
+    paths = set(rdir.glob("*_stats.json"))
+    paths.update(rdir.glob("runs/*/stats.json"))
+    return sorted(paths)
+
+
+def _run_id_from_stats_path(path: Path) -> str:
+    if path.name == "stats.json":
+        return path.parent.name
+    return path.name.replace("_stats.json", "")
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--results_dir", required=True)
@@ -44,11 +56,11 @@ def main() -> int:
     pattern = f"{args.workload.lower()}_([A-D])_.*s2_stats.json"
     
     # Fallback if no s2: try s1
-    files = sorted(rdir.glob("*_stats.json"))
+    files = _stats_paths(rdir)
     
     selected_files = []
     for f in files:
-        match = re.search(pattern, f.name)
+        match = re.search(pattern, _run_id_from_stats_path(f) + "_stats.json")
         if match:
             selected_files.append((f, match.group(1)))
 
@@ -56,7 +68,7 @@ def main() -> int:
         # If no s2, try s1
         pattern_s1 = f"{args.workload.lower()}_([A-D])_.*s1_stats.json"
         for f in files:
-            match = re.search(pattern_s1, f.name)
+            match = re.search(pattern_s1, _run_id_from_stats_path(f) + "_stats.json")
             if match:
                 selected_files.append((f, match.group(1)))
 

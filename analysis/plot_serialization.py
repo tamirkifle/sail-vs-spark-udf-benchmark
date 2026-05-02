@@ -55,10 +55,16 @@ def _resolve_trace_path(manifest_path: Path, manifest: dict) -> Path:
     return manifest_path.with_name(manifest_path.name.replace("_manifest.json", "_trace.json"))
 
 
+def _manifest_paths(rdir: Path) -> list[Path]:
+    paths = set(rdir.glob("*_manifest.json"))
+    paths.update(rdir.glob("runs/*/manifest.json"))
+    return sorted(paths)
+
+
 def _collect_rows(rdir: Path) -> list[dict[str, float | str]]:
     grouped: dict[tuple[str, str], list[tuple[float, float, float, float]]] = {}
 
-    for manifest_path in sorted(rdir.glob("*_manifest.json")):
+    for manifest_path in _manifest_paths(rdir):
         manifest = json.loads(manifest_path.read_text())
         trace_path = _resolve_trace_path(manifest_path, manifest)
         if not trace_path.exists():

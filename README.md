@@ -29,45 +29,52 @@ on the same data and same models, differing **only** in the runtime/UDF path.
 | C    | Sail   | `mapInArrow` zero-copy  | ≈ 0                         |
 | D    | Sail   | UDTF `LATERAL`          | ≈ 0                         |
 
-## How to run
+## Run Modes
 
-**Laptop (CPU / Apple Silicon MPS).** Dataset = 100 rows. Small
-models or mocks. Proves wiring works and shapes the expected overhead curve before the
-GPU run.
+Use one setup command and one run command. Every run prepares data, starts
+Sail/vLLM when needed, executes the matrix, aggregates results, and writes an
+HTML report.
 
-**With GPU Access (H200 141 GB).** Dataset = 1,500 rows. FP8 larger models.
-Real numbers for the write-up.
+| Mode | Config | Runs | Use when |
+| ---- | ------ | ---- | -------- |
+| `mock` | `config/mock.yaml` | Spark A/B only, synthetic prompts, all models mocked | First install check on macOS/Linux |
+| `cpu` | `config/cpu.yaml` | A/B/C/D, local Sail server, HF dataset, mock models on CPU | Laptop or CPU host benchmarking |
+| `gpu` | `config/gpu_h200.yaml` | A/B/C/D, local Sail server, vLLM generation | CUDA host / H200 benchmark |
 
 ## Quickstart
 
 ```bash
-# one-time: install the package into the sail venv
-source /Users/tamir/Documents/MyCode/LakeSail/sail/.venvs/default/bin/activate
-pip install -e .
+# 1) Install the lightest environment and run a full smoke benchmark.
+scripts/setup_env.sh --mode mock --venv .venv
+scripts/run_benchmark.sh --mode mock --venv .venv
 
-# install environment-specific runtime deps as needed
-# for example: pytest pyarrow pyspark pyyaml sentence-transformers transformers
+# 2) CPU/macOS run with A/B/C/D. This starts a local Sail server automatically.
+scripts/setup_env.sh --mode cpu --venv .venv
+scripts/run_benchmark.sh --mode cpu --venv .venv
 
-# 1) prep dataset
-python scripts/prep_dataset.py --config config/laptop.yaml
+# 3) GPU run. This starts Sail and vLLM automatically.
+scripts/setup_env.sh --mode gpu --venv .venv_gpu
+scripts/run_benchmark.sh --mode gpu --venv .venv_gpu
+```
 
-# 2) run one config (fastest smoke test)
-python -m sail_vs_spark.runner.cli --config config/laptop.yaml \
-       --workload w0 --execution A --depth 1 --samples 1
+Reports are written to `results/<mode>/<timestamp>/report/aggregate.html`.
+Raw per-run artifacts are under `results/<mode>/<timestamp>/runs/<run_id>/`.
+Hugging Face, Transformers, and SentenceTransformers models/cache files are
+kept repo-local under `./models` by default.
 
-# 3) run ALL 16 runs on laptop
-bash scripts/run_all_laptop.sh
+Useful overrides:
 
-# 4) aggregate report + plots
-python analysis/aggregate_results.py --results_dir results/laptop/20260501_064405
-# writes aggregate_runs.csv, aggregate_summary.csv/json, aggregate.md, aggregate.html, and plots
-# open the HTML report in your browser: results/laptop/20260501_064405/aggregate.html
+```bash
+WORKLOADS="w0 w1" EXECUTIONS="A B" ITERATIONS=1 scripts/run_benchmark.sh --mode mock
+RESULTS_DIR=results/demo FORCE_SYNTHETIC=1 scripts/run_benchmark.sh --mode cpu
+CONFIG=config/gpu_v100_smoke.yaml scripts/run_benchmark.sh --mode gpu --venv .venv_gpu
+MODELS_DIR=/mnt/fast/models scripts/run_benchmark.sh --mode gpu --venv .venv_gpu
 ```
 
 ## Key technical constraints (from prior learnings)
 
-1. **In-process inference only.** Models load inside the Python worker.
-   No HTTP, no Ollama, no separate servers.
+1. **Generation provider.** Real generation is served by vLLM. Mock and CPU
+   modes use deterministic mock generation so they run on any machine.
 2. **Lazy `torch` imports** inside UDF closures — PySpark cloudpickles every
    closure even under Sail (because it flows over Spark Connect gRPC).
 3. **Sail UDTF syntax.** Use `LATERAL fn(col1, col2)`, NOT
@@ -81,13 +88,13 @@ See `config/`, `src/sail_vs_spark/`, `scripts/`, `analysis/`, `tests/`.
 
 ## Measured metrics per run
 
-- **Boundary timing** (phase breakdown per batch, `results/*_boundary.json`):
+- **Trace timing** (Chrome trace events, one file per run under `runs/<run_id>/trace.json`):
   `DATA_TRANSFER_IN`, `MODEL_LOAD`, `TOKENIZE`, `INFERENCE`, `SCORE`,
   `DETOKENIZE`, `DATA_TRANSFER_OUT`.
-- **System telemetry** (`results/*_stats.json`):
+- **System telemetry** (one file per run under `runs/<run_id>/stats.json`):
   wall-clock, CPU %, RSS, peak RAM, GPU util/mem, cumulative bytes written,
   `nvidia-smi dmon` log.
-- **Derived** (`results/*_summary.json`):
+- **Derived report** (`report/aggregate_summary.json`):
   `serialization_tax_pct = (transfer_in + transfer_out)/wall`,
   `pipeline_continuity = gpu_active_time / wall`.
 

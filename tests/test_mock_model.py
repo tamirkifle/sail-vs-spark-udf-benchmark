@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
-from sail_vs_spark.models.adapters import _HFScorer
+from sail_vs_spark.models.adapters import _HFScorer, _VLLMGenerator
 from sail_vs_spark.models.loaders import (
     get_embedder, get_generator, get_scorer, reset_singletons,
 )
@@ -61,12 +61,33 @@ def test_embedder_cosine_self():
 
 
 def test_get_generator_falls_back_to_mock():
-    # transformers almost certainly not installed in the minimal test env —
-    # but even if it is, allow_mock=True guarantees we still get a callable.
     gen = get_generator({"name": "does-not-exist", "allow_mock": True,
                          "prefer_mock": True, "device": "cpu"})
     out = gen.generate(["hi"], n=1)
     assert len(out) == 1 and isinstance(out[0][0], str)
+
+
+def test_get_generator_uses_vllm_url(monkeypatch):
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    gen = get_generator(
+        {
+            "name": "served-model",
+            "server_url": "http://127.0.0.1:8000",
+            "allow_mock": False,
+        }
+    )
+    assert isinstance(gen, _VLLMGenerator)
+    assert gen.model_id == "served-model"
+    assert gen.server_url == "http://127.0.0.1:8000"
+
+
+def test_get_generator_requires_vllm_when_mock_disabled(monkeypatch):
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    try:
+        get_generator({"name": "served-model", "allow_mock": False})
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "vLLM" in str(exc)
 
 
 def test_get_scorer_singleton():

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Source this file (don't execute it) from run_all_gpu.sh so VLLM_BASE_URL
+# Source this file (don't execute it) from run_benchmark.sh so VLLM_BASE_URL
 # and VLLM_PID stay in the calling shell's scope.
 #
-# Usage in run_all_gpu.sh:
+# Usage in run_benchmark.sh:
 #   export VLLM_MODEL="Qwen/Qwen3.5-122B-A10B-FP8"
 #   source scripts/start_vllm_server.sh
 

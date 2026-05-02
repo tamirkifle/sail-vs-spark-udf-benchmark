@@ -30,7 +30,6 @@ models:
     allow_mock: false
   scorer:
     name: OpenAssistant/reward-model-deberta-v3-large-v2
-    fallback_name: OpenAssistant/reward-model-deberta-v3-large
     allow_mock: false
   embedder:
     name: BAAI/bge-large-en-v1.5

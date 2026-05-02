@@ -13,7 +13,7 @@ def _write_json(path: Path, data: dict) -> None:
 def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Path, monkeypatch) -> None:
     results_dir = tmp_path / "results"
     results_dir.mkdir()
-    monkeypatch.setattr(aggregate_results, "_run_plot_scripts", lambda _: None)
+    monkeypatch.setattr(aggregate_results, "_run_plot_scripts", lambda *_: None)
 
     trace_path = results_dir / "custom_trace_name.json"
     stats_path = results_dir / "custom_stats_name.json"
@@ -97,13 +97,14 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert row["Disk Write (MB)"] == 4.0
     assert row["Trace Events"] == 3
 
-    assert (results_dir / "aggregate_runs.csv").exists()
-    assert (results_dir / "aggregate_summary.csv").exists()
-    assert (results_dir / "aggregate_summary.json").exists()
-    assert (results_dir / "aggregate.md").exists()
-    assert (results_dir / "aggregate.html").exists()
+    report_dir = results_dir / "report"
+    assert (report_dir / "aggregate_runs.csv").exists()
+    assert (report_dir / "aggregate_summary.csv").exists()
+    assert (report_dir / "aggregate_summary.json").exists()
+    assert (report_dir / "aggregate.md").exists()
+    assert (report_dir / "aggregate.html").exists()
 
-    html = (results_dir / "aggregate.html").read_text()
+    html = (report_dir / "aggregate.html").read_text()
     assert 'id="overhead-breakdown-chart"' in html
     assert 'id="overhead-breakdown-data"' in html
     assert 'id="memory-comparison-chart"' in html
@@ -114,3 +115,38 @@ def test_aggregate_uses_manifest_artifact_paths_and_writes_outputs(tmp_path: Pat
     assert "Memory Comparison" in html
     assert "Relative Speedups" in html
     assert "Spark's batched path" in html
+
+
+def test_aggregate_reads_per_run_artifact_folders(tmp_path: Path, monkeypatch) -> None:
+    results_dir = tmp_path / "results"
+    run_dir = results_dir / "runs" / "w0_A_s1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(aggregate_results, "_run_plot_scripts", lambda *_: None)
+
+    _write_json(run_dir / "trace.json", {"traceEvents": []})
+    _write_json(
+        run_dir / "stats.json",
+        {
+            "wall_clock_sec": 1.0,
+            "output_rows": 10,
+            "samples": [],
+        },
+    )
+    _write_json(
+        run_dir / "manifest.json",
+        {
+            "run_id": "w0_A_s1",
+            "workload": "w0",
+            "execution": "A",
+            "depth": 1,
+            "stats_json": str(run_dir / "stats.json"),
+            "trace_json": str(run_dir / "trace.json"),
+            "wall_clock_sec": 1.0,
+            "output_rows": 10,
+        },
+    )
+
+    summary = aggregate_results.aggregate(str(results_dir))
+
+    assert len(summary) == 1
+    assert (results_dir / "report" / "aggregate.html").exists()

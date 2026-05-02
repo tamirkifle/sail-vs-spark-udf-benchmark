@@ -14,8 +14,7 @@ the benchmark still works on a MacBook (no GPU) and produces the other
 metrics unchanged.
 
 In parallel, it launches ``nvidia-smi dmon`` in the background with 1-second
-resolution to produce a high-res timeline log at
-``/tmp/nvidia_dmon_<config>.log`` for the plotting stage.
+resolution to produce a high-res timeline log for the plotting stage.
 
 Usage
 ─────
@@ -48,10 +47,12 @@ class MetricsCollector:
         config_name: str,
         sample_interval_sec: float = DEFAULT_SAMPLE_INTERVAL_SEC,
         nvidia_dmon_dir: str = "/tmp",
+        nvidia_dmon_path: str | Path | None = None,
     ) -> None:
         self.config_name = config_name
         self.interval = sample_interval_sec
         self.nvidia_dmon_dir = nvidia_dmon_dir
+        self.nvidia_dmon_path = Path(nvidia_dmon_path) if nvidia_dmon_path else None
 
         self._start_time: float | None = None
         self._end_time: float | None = None
@@ -102,9 +103,13 @@ class MetricsCollector:
 
     # ── Internals ──────────────────────────────────────────────────────────
     def _launch_nvidia_dmon(self) -> None:
-        log_path = os.path.join(
-            self.nvidia_dmon_dir, f"nvidia_dmon_{self.config_name}.log"
-        )
+        if self.nvidia_dmon_path is not None:
+            self.nvidia_dmon_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path = str(self.nvidia_dmon_path)
+        else:
+            log_path = os.path.join(
+                self.nvidia_dmon_dir, f"nvidia_dmon_{self.config_name}.log"
+            )
         self._nvidia_log = log_path
         try:
             # -s pucm = pstate, util, power, cumulative mem; -d = seconds

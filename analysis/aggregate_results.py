@@ -79,10 +79,10 @@ TRACE_PHASES_OF_INTEREST = {
 }
 
 PLOT_SCRIPTS = [
-    "analysis/plot_depth_runtime.py",
-    "analysis/plot_gpu_timeline.py",
-    "analysis/plot_disk_io.py",
-    "analysis/plot_serialization.py",
+    ("analysis/plot_depth_runtime.py", "depth_runtime.png"),
+    ("analysis/plot_gpu_timeline.py", "gpu_timeline.png"),
+    ("analysis/plot_disk_io.py", "disk_io.png"),
+    ("analysis/plot_serialization.py", "serialization_pies.png"),
 ]
 
 SAIL_SVG = """
@@ -286,9 +286,15 @@ def _build_run_record(manifest_path: Path) -> dict[str, Any] | None:
     }
 
 
+def _manifest_paths(results_dir: Path) -> list[Path]:
+    paths = set(results_dir.glob("*_manifest.json"))
+    paths.update(results_dir.glob("runs/*/manifest.json"))
+    return sorted(paths)
+
+
 def _build_run_df(results_dir: Path) -> pd.DataFrame:
     rows = []
-    for manifest_path in sorted(results_dir.glob("*_manifest.json")):
+    for manifest_path in _manifest_paths(results_dir):
         row = _build_run_record(manifest_path)
         if row is not None:
             rows.append(row)
@@ -395,14 +401,15 @@ def _build_summary_df(run_df: pd.DataFrame) -> pd.DataFrame:
     return summary_df
 
 
-def _write_csvs(results_dir: Path, run_df: pd.DataFrame, summary_df: pd.DataFrame) -> None:
-    run_df.to_csv(results_dir / "aggregate_runs.csv", index=False)
-    summary_df.to_csv(results_dir / "aggregate_summary.csv", index=False)
-    with open(results_dir / "aggregate_summary.json", "w") as fh:
+def _write_csvs(report_dir: Path, run_df: pd.DataFrame, summary_df: pd.DataFrame) -> None:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    run_df.to_csv(report_dir / "aggregate_runs.csv", index=False)
+    summary_df.to_csv(report_dir / "aggregate_summary.csv", index=False)
+    with open(report_dir / "aggregate_summary.json", "w") as fh:
         json.dump(summary_df.to_dict(orient="records"), fh, indent=2)
 
 
-def _write_markdown(results_dir: Path, summary_df: pd.DataFrame) -> None:
+def _write_markdown(report_dir: Path, summary_df: pd.DataFrame) -> None:
     lines = [
         "# Sail vs Spark Benchmark Summary",
         "",
@@ -434,7 +441,7 @@ def _write_markdown(results_dir: Path, summary_df: pd.DataFrame) -> None:
         lines.append(view.to_markdown(index=False))
         lines.append("")
 
-    (results_dir / "aggregate.md").write_text("\n".join(lines))
+    (report_dir / "aggregate.md").write_text("\n".join(lines))
 
 
 def _logo_svg(config: str) -> str:
@@ -652,7 +659,7 @@ def _render_config_svg(code: str) -> str:
 
 
 def _load_report_context(results_dir: Path) -> dict[str, Any]:
-    manifest_paths = sorted(results_dir.glob("*_manifest.json"))
+    manifest_paths = _manifest_paths(results_dir)
     if not manifest_paths:
         return {}
     manifest = _read_json(manifest_paths[0])
@@ -1625,7 +1632,12 @@ def _build_speedup_section(chart_data: dict[str, Any]) -> str:
 """.replace("__PAYLOAD__", payload_json).replace("__LEGEND__", legend_markup).replace("__BASELINE_CODE__", baseline_code).replace("__BASELINE_LABEL__", baseline_label)
 
 
-def _write_html(results_dir: Path, summary_df: pd.DataFrame, run_df: pd.DataFrame) -> None:
+def _write_html(
+    results_dir: Path,
+    report_dir: Path,
+    summary_df: pd.DataFrame,
+    run_df: pd.DataFrame,
+) -> None:
     rows = summary_df.copy()
     rows["DepthDisplay"] = rows["Depth"].apply(lambda x: int(x) if pd.notna(x) else "-")
     rows["LogoSVG"] = rows["Config"].map(_logo_svg)
@@ -1944,27 +1956,28 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame, run_df: pd.DataFram
     plots = [
         {
             "title": "GPU Timeline",
-            "filename": "gpu_timeline.png",
+            "filename": "plots/gpu_timeline.png",
             "blurb": "GPU utilization over time, per configuration. Gaps between compute bursts indicate scheduling or data-transfer stalls that limit accelerator efficiency.",
         },
         {
             "title": "Depth Runtime",
-            "filename": "depth_runtime.png",
+            "filename": "plots/depth_runtime.png",
             "blurb": "Depth = number of sequential UDF pipeline stages, where each stage does a trivially cheap computation. W0 runtime as a function of chain depth. Slope quantifies the per-crossing overhead tax that accumulates with each additional engine–Python round trip.",
         },
         {
             "title": "Disk IO",
-            "filename": "disk_io.png",
+            "filename": "plots/disk_io.png",
             "blurb": "Bytes written to disk per run, with automatic unit scaling. Values elevated relative to input size indicate intermediate materialization or unnecessary data duplication.",
         },
         {
             "title": "Serialization vs Compute",
-            "filename": "serialization_pies.png",
+            "filename": "plots/serialization_pies.png",
             "blurb": "Time budget decomposition per workload and configuration: traced model compute, traced serialization and transfer, and residual framework time. Unattributed time is the difference between wall-clock and the sum of instrumented spans.",
         },
     ]
 
-    (results_dir / "aggregate.html").write_text(
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "aggregate.html").write_text(
         template.render(
             rows=rows,
             plots=plots,
@@ -1978,48 +1991,58 @@ def _write_html(results_dir: Path, summary_df: pd.DataFrame, run_df: pd.DataFram
     )
 
 
-def _run_plot_scripts(results_dir: Path) -> None:
-    print("Generating plots...")
-    mpl_dir = results_dir / ".mplconfig"
+def _run_plot_scripts(results_dir: Path, plots_dir: Path) -> None:
+    print("Generating plots...", flush=True)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    mpl_dir = plots_dir / ".mplconfig"
     mpl_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["MPLCONFIGDIR"] = str(mpl_dir)
     env["MPLBACKEND"] = "Agg"
-    for script in PLOT_SCRIPTS:
+    for script, filename in PLOT_SCRIPTS:
         script_path = Path(script)
         if not script_path.exists():
             continue
-        cmd = [sys.executable, str(script_path), "--results_dir", str(results_dir)]
-        print(f"Running {script}...")
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--results_dir",
+            str(results_dir),
+            "--out",
+            str(plots_dir / filename),
+        ]
+        print(f"Running {script}...", flush=True)
         try:
             subprocess.run(cmd, check=True, env=env)
         except subprocess.CalledProcessError as exc:
             print(f"Warning: failed to run {script}: {exc}")
 
 
-def aggregate(results_dir: str) -> pd.DataFrame:
+def aggregate(results_dir: str, report_dir: str | None = None) -> pd.DataFrame:
     path = Path(results_dir)
+    out_dir = Path(report_dir) if report_dir else path / "report"
     run_df = _build_run_df(path)
     if run_df.empty:
         print("No results found.")
         return run_df
 
     summary_df = _build_summary_df(run_df)
-    _write_csvs(path, run_df, summary_df)
-    _write_markdown(path, summary_df)
-    _run_plot_scripts(path)
-    _write_html(path, summary_df, run_df)
-    print(f"Wrote aggregate outputs under {path}")
+    _write_csvs(out_dir, run_df, summary_df)
+    _write_markdown(out_dir, summary_df)
+    _run_plot_scripts(path, out_dir / "plots")
+    _write_html(path, out_dir, summary_df, run_df)
+    print(f"Wrote aggregate outputs under {out_dir}")
     return summary_df
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results_dir", required=True)
+    parser.add_argument("--report-dir", default=None)
     args = parser.parse_args()
     results_dir = Path(args.results_dir)
-    aggregate(args.results_dir)
-    report_path = results_dir / "aggregate.html"
+    aggregate(args.results_dir, report_dir=args.report_dir)
+    report_path = Path(args.report_dir) / "aggregate.html" if args.report_dir else results_dir / "report" / "aggregate.html"
     if report_path.exists():
         webbrowser.open(report_path.resolve().as_uri())
     return 0

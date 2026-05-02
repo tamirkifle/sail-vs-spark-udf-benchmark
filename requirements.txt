@@ -18,13 +18,12 @@ datasets>=2.20.0
 huggingface-hub>=0.24.0
 pyyaml>=6.0
 
-# Modelling (laptop-safe versions; heavy installs are conditional)
+# Modelling (heavy installs are conditional; use scripts/setup_env.sh)
 # The following are commented-out so `pip install -r requirements.txt`
 # works on any laptop. Install them manually for actual model runs:
 #
-#   pip install torch transformers sentence-transformers
-#   # for GPU (H200) also:
-#   pip install vllm accelerate bitsandbytes
+#   scripts/setup_env.sh --mode cpu
+#   scripts/setup_env.sh --mode gpu --venv .venv_gpu
 #
 # The code uses lazy `import torch` etc. — it will fall back to mock models
 # automatically if these are not installed, so the scaffolding + W0 run fine

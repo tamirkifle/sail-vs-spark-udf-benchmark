@@ -32,6 +32,18 @@ def _resolve_output_path(manifest_path: Path, manifest: dict) -> Path | None:
     return alt if alt.exists() else None
 
 
+def _stats_paths(rdir: Path) -> list[Path]:
+    paths = set(rdir.glob("*_stats.json"))
+    paths.update(rdir.glob("runs/*/stats.json"))
+    return sorted(paths)
+
+
+def _manifest_for_stats(stats_path: Path) -> Path:
+    if stats_path.name == "stats.json":
+        return stats_path.with_name("manifest.json")
+    return stats_path.with_name(stats_path.name.replace("_stats.json", "_manifest.json"))
+
+
 def _unit_scale(max_mb: float) -> tuple[float, str, str]:
     if max_mb < 0.1:
         return 1000.0, "KB", "%.1f"
@@ -51,11 +63,11 @@ def main() -> int:
     line_mode = False
     fallback_rows = []
 
-    for stats_path in sorted(rdir.glob("*_stats.json")):
+    for stats_path in _stats_paths(rdir):
         with open(stats_path) as fh:
             stats = json.load(fh)
 
-        manifest_path = stats_path.with_name(stats_path.name.replace("_stats.json", "_manifest.json"))
+        manifest_path = _manifest_for_stats(stats_path)
         manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
         samples = stats.get("samples") or []
 
